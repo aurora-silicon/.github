@@ -1,5 +1,9 @@
-Bringing Windows on ARM support to Apple Silicon
+# Aurora Silicon
 
-Very WIP project, but we've got a working Windows Desktop booting from internal SSD, though it is software rendered.
+New light for Apple Silicon.
 
-Join Discord to chat about it: https://discord.gg/DXmsSSc5aY
+This project aims to implement broader Linux and Windows support on Apple Silicon platform.
+
+Actively reverse engineering and implementing drivers for newer platforms i.e. M3-M5.
+
+Join our Discord to chat about it: https://discord.gg/DXmsSSc5aY
