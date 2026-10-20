@@ -2,10 +2,8 @@
 
 New light for Apple Silicon.
 
-This project aims to implement broader Linux and Windows support on Apple Silicon platform.
+We aim to deliver a complete and polished Linux experience on Apple Silicon, from installation to everyday use. Our work spans the kernel, graphics drivers, and the tools that make it all work together.
 
-Actively reverse engineering and implementing drivers including newer platforms i.e. M1 through M6, carrying over the incredible work of Asahi Linux project. Not affiliated in any way with Asahi Linux. This project forks off Asahi due to the strict AI policy that upstream adopts.
-
-Moreover, a big focus of this project is to implement NT drivers for Windows on Arm platform, including native DirectX 12/WDDM KMD natively over AGX to tap into the potential of Apple Silicon hardware.
+We're also working on porting Windows to Apple Silicon.
 
 Join our Discord to chat about it: https://discord.gg/DXmsSSc5aY
