@@ -1,0 +1,27 @@
+name: Diagnose Discord webhook (temporary)
+on:
+  push:
+    branches: [ci/diag-discord-webhook]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read-only webhook probe (GET, posts nothing)
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -u
+          CLEAN="$(printf '%s' "$WEBHOOK" | tr -d '[:space:]')"
+          BASE="${CLEAN%%\?*}"; BASE="${BASE%/}"
+          echo "::add-mask::$BASE"
+          echo "secret length: ${#WEBHOOK}, cleaned length: ${#BASE}"
+          case "$BASE" in
+            https://discord.com/api/webhooks/*|https://discordapp.com/api/webhooks/*) echo "shape: webhook URL" ;;
+            "") echo "shape: EMPTY" ;;
+            *) echo "shape: NOT a webhook URL" ;;
+          esac
+          code=$(curl -sS -o resp.json -w '%{http_code}' "$BASE")
+          echo "GET -> HTTP $code"
+          jq '{code, message, type, channel_id, name}' resp.json || cat resp.json
