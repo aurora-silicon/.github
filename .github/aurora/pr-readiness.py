@@ -114,7 +114,7 @@ def request(method, path, body=None, tries=4):
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             msg = e.read().decode(errors="replace")[:300]
-            limited = e.code in (429, 502, 503) or (e.code == 403 and ("rate limit" in msg.lower() or e.headers.get("X-RateLimit-Remaining") == "0"))
+            limited = e.code in (429, 500, 502, 503, 504) or (e.code == 403 and ("rate limit" in msg.lower() or e.headers.get("X-RateLimit-Remaining") == "0"))
             if limited and attempt < tries - 1:
                 wait = int(e.headers.get("Retry-After") or 0) or 20 * (attempt + 1)
                 log(f"{method} {path}: HTTP {e.code}, retry in {wait}s: {msg}")
@@ -141,7 +141,7 @@ def graphql(query, **variables):
 LIST_Q = """
 query($owner:String!,$name:String!,$after:String){
   repository(owner:$owner,name:$name){
-    pullRequests(states:OPEN,first:100,after:$after){
+    pullRequests(states:OPEN,first:50,after:$after){
       pageInfo{hasNextPage endCursor}
       nodes{number updatedAt headRefOid isDraft mergeable reviewDecision
         labels(first:30){nodes{name}}
