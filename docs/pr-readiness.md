@@ -12,7 +12,7 @@ how maintainers use it is the [maintainer handbook](https://github.com/aurora-si
 | Label | Set when |
 | --- | --- |
 | `ready-to-merge` | CI at the head passed (or the change has no CI), an approving review counts, a hardware row is at the head (or `No runtime change.`), no open change request, no conflict, no `hold` or `blocked`, and (for PRs opened from 2026-11-25) the body has its `Tested:` and `Risk:` lines. |
-| `needs-review` | No approval that GitHub counts (Core or Omarchy Mac, not the author), and no `Verdict: MERGE` at the head from an organisation member. |
+| `needs-review` | No approval that GitHub counts (Core or Omarchy Mac, not the author), and no `Verdict: MERGE` at the head from an organisation member other than the author. |
 | `needs-hw-row` | No line in the PR body (folded blocks included) or a comment with the head SHA (7+ hex digits) and a Mac (`J616s`, `T6040`, `M2 Air`, ...), and `Tested:` does not say `no runtime change`. |
 | `changes-requested` | A reviewer's latest review requests changes, or the latest review verdict at the head is FINISH, HOLD or CLOSE. |
 | `ci-failing` | A check failed at the head. |
