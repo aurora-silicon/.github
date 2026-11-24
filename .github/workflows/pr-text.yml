@@ -3,9 +3,10 @@ name: pr-text
 # Reusable PR text check for every Aurora Silicon repository: the 'Tested:'
 # and 'Risk:' lines of agent-guidelines policy/pr-structure.md, and no AI
 # attribution in the title, body or the author's own commits.
-# The logic is the pr-text mode of .github/aurora/agent-policy.sh: the
-# calling repository's copy on its default branch when it has one, else
-# the canonical copy in aurora-silicon/mesa. Never runs PR code.
+# The logic is .github/aurora/pr-text.sh in this repository (one copy for
+# the whole org, self-tested by pr-text-selftest.yml). If that script is
+# missing or stops rejecting a bad body, the check fails; it never skips.
+# Never runs PR code.
 # Callers: copy workflow-templates/pr-text.yml into the repository.
 
 on:
@@ -15,6 +16,10 @@ on:
         description: PRs created before this time get warnings only
         type: string
         default: "2026-11-25T00:00:00Z"
+      tool-ref:
+        description: Ref of aurora-silicon/.github that holds pr-text.sh
+        type: string
+        default: main
 
 permissions: {}
 
@@ -27,28 +32,33 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Policy script of this repository
+      - name: Canonical pr-text script
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          path: .repo-policy
-          fetch-depth: 1
-          filter: blob:none
-          sparse-checkout: .github/aurora
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Canonical policy script
-        uses: actions/checkout@v7
-        with:
-          repository: aurora-silicon/mesa
-          ref: aurora-wip
+          repository: aurora-silicon/.github
+          ref: ${{ inputs.tool-ref }}
           path: .canon-policy
           fetch-depth: 1
           filter: blob:none
           sparse-checkout: .github/aurora
           sparse-checkout-cone-mode: false
           persist-credentials: false
+
+      - name: The check can fail
+        # A checker that passes everything looks the same as a clean PR.
+        # Prove this copy still rejects an empty body before trusting it.
+        env:
+          TOOL_REF: ${{ inputs.tool-ref }}
+        run: |
+          script=.canon-policy/.github/aurora/pr-text.sh
+          if [ ! -f "$script" ]; then
+            echo "::error title=pr-text broken::$script is missing from aurora-silicon/.github@$TOOL_REF. Fix the canonical copy there; this check does not skip."
+            exit 1
+          fi
+          if PR_TITLE=x PR_BODY='' PR_CREATED=2999-01-01T00:00:00Z PR_DRAFT=false bash "$script" >/dev/null 2>&1; then
+            echo "::error title=pr-text broken::$script accepted an empty PR body. Fix the canonical copy in aurora-silicon/.github; this check does not skip."
+            exit 1
+          fi
 
       - name: Collect the author's commit messages
         env:
@@ -68,13 +78,4 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           STRUCTURE_SINCE: ${{ inputs.since }}
           COMMITS_FILE: ${{ runner.temp }}/commits
-        run: |
-          script=.repo-policy/.github/aurora/agent-policy.sh
-          if ! grep -q '^pr-text)' "$script" 2>/dev/null; then
-            script=.canon-policy/.github/aurora/agent-policy.sh
-          fi
-          if ! grep -q '^pr-text)' "$script" 2>/dev/null; then
-            echo "::notice::no agent-policy.sh with a pr-text mode yet"
-            exit 0
-          fi
-          bash "$script" pr-text
+        run: bash .canon-policy/.github/aurora/pr-text.sh
