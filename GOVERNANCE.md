@@ -5,9 +5,9 @@ Aurora Silicon is run by its **Owners**, Ryan Murray ([@RyanTheTide](https://git
 | Role | Who | May |
 | --- | --- | --- |
 | Owner | Ryan, Dj | everything; alone cut `v*` releases and hotfixes, change settings, rulesets, secrets and access |
-| Core | `core` team | review, approve and merge PRs that meet the merge policy on every product repo; triage; run workflows; run the stable gate |
+| Core | `core` team | review, approve and merge PRs that meet the merge policy on every product repo (the website: its designated owners); triage; run workflows; run the stable gate |
 | Omarchy Mac maintainer | `omarchy-m` team | review, approve and merge PRs that meet the merge policy on the repos Omarchy ships or consumes; triage; push `feat/` `fix/` `wip/` branches; run workflows |
-| Aurora Dev | `aurora-dev` team | develop: push `feat/` `fix/` `wip/` branches, open PRs, review, re-run CI, request lab rows; **do not merge** into default branches (enforced) |
+| Aurora Dev | `aurora-dev` team | develop: push `feat/` `fix/` `wip/` branches, open PRs, review, re-run CI, request lab rows; **do not merge** into default branches (enforced by rulesets; the repos still pending are listed in `access-tiers.md`) |
 | Contributor | everyone | open issues and PRs from a fork |
 
 Core and Omarchy Mac approvals are the ones that unlock a merge (code-owner review). Nobody merges their own PR without a non-author review, merges runtime code without a hardware row, pushes to a default branch, or moves a release tag. Which team holds which role on which repository: [`policy/access-tiers.md`](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/access-tiers.md). How to review and merge: the [handbook](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/review-and-merge-handbook.md).
