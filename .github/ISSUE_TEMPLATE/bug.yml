@@ -1,0 +1,19 @@
+name: Bug
+description: Something broke or behaves wrongly.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: {label: What happens, description: "One or two sentences. What you expected instead."}
+    validations: {required: true}
+  - type: input
+    id: mac
+    attributes: {label: Mac and build, placeholder: "M2 mini (J473), fleet87 / 7.3.0-aurora-fleet87, Fedora 45"}
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes: {label: How to reproduce, description: "Short steps."}
+    validations: {required: true}
+  - type: textarea
+    id: evidence
+    attributes: {label: Logs and evidence, description: "Paste logs here; they are folded automatically.", render: shell}

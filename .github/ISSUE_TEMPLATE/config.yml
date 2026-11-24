@@ -1,8 +1,5 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
-  - name: Security vulnerability
-    url: https://github.com/aurora-silicon/linux/security/advisories/new
-    about: Report security problems privately, never in a public issue.
-  - name: Aurora Silicon rules and policies
-    url: https://github.com/aurora-silicon/agent-guidelines
-    about: How we work: hard rules, merge policy, branches and releases.
+  - name: Security problem
+    url: https://github.com/aurora-silicon/.github/blob/main/SECURITY.md
+    about: Report it privately, never in a public issue.

@@ -12,8 +12,8 @@ Thanks for helping bring Linux to Apple Silicon Macs. This page applies to every
 ## In short
 
 1. Branch from `main` (`feat/<topic>` or `fix/<topic>`, or in your fork) and open a pull request into `main` (or the repo's default branch where a repo has not moved to `main` yet).
-2. Every commit has a human `Signed-off-by` ([DCO](https://developercertificate.org/)). No agent trailers in commits. If an agent helped, end the PR body with one `Assisted-by:` line naming the model or tool.
-3. Fill in the PR template: Problem, Change, Testing, Still to run. Put long detail in collapsible `<details>` blocks.
+2. Every commit has a human `Signed-off-by` ([DCO](https://developercertificate.org/)). No AI attribution anywhere: no agent trailers in commits, and no `Assisted-by:`, `Generated with` or model signatures in PR titles, bodies, comments or reviews. CI rejects them.
+3. Fill in the PR template: What, Tested (Macs at the head SHA), Risk (one-way or two-way door, which Macs), Not yet; detail goes in the folded blocks. CI checks the Tested and Risk lines. Guide: [pr-structure.md](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/pr-structure.md); reviews: [pr-review.md](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/pr-review.md).
 4. Prove it on the Mac it affects, at the PR head, with numbers. No Mac? Say so in the PR and we will run it on a lab Mac.
 5. Never post anything derived from Apple binaries, firmware or tuning values, and never post serial numbers.
 

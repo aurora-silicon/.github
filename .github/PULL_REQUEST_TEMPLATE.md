@@ -1,48 +1,22 @@
-<!--
-Organisation default (from aurora-silicon/agent-guidelines templates/).
-Aurora Silicon PR. Rules: AGENTS.md, pre-pr-checklist.md and policy/pr-structure.md
-in https://github.com/aurora-silicon/agent-guidelines.
-Short prose a person can read in a minute. Describe the code and its testing.
-No internal process, reviews or holds.
--->
+<!-- Keep the visible part short. Detail for reviewers and agents goes in the folded blocks.
+     No AI attribution, no serial numbers. Guide: https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/pr-structure.md -->
 
-## Problem
+**What:** <!-- one or two sentences: the change and why it's needed. Fixes #NNN -->
 
-<!-- What is wrong or missing, on which machine (chip/board), kernel/build, firmware. Fixes #NNN -->
+**Tested:** <!-- Macs at the head SHA + result, e.g. "J473 M2 mini, J413 M2 Air at `abc1234`: 0 failed units, deqp-vk 0 fail". Docs/CI only: "no runtime change" -->
 
-## Change
+**Risk:** <!-- one-way | two-way door · which Macs it can affect, e.g. "two-way · M4 Pro" -->
 
-<!-- What you changed and why it is the proper fix.
-     Which chips/boards it affects. If it is gated: the hardware reason.
-     If you deviated from a default: which one and why. -->
+**Not yet:** <!-- what's still untested, or "nothing" -->
 
-## Testing
+<details><summary>Details</summary>
 
-<!-- Hardware you ran on and the result. A/B or regression table. Suite name and counts
-     (0 AVC, 0 failed units, 0 new kernel errors). Performance change if any.
-     GPU claims: policy/mesa-performance-claims.md. -->
+<!-- How it works, design choices, anything a reviewer must know. -->
 
-## Still to run
-
-<!-- What is not covered yet, and on which hardware. -->
-
-<!-- Full detail for reviewers goes in collapsible blocks. Never hide the problem, the
-     change or a regression in one.
-<details>
-<summary>Full test results</summary>
-
-...
 </details>
--->
 
-- [ ] Clean-room: no Apple code, strings, firmware, RE output or tuning values
-- [ ] No chip/board/firmware-version gate where a hardware property can decide
-- [ ] Works on the default kernel command line; no hacks, delays or lab-only paths
-- [ ] Safety limits come from the machine, not from constants in code
-- [ ] Hardware safety rules followed for every test boot
-- [ ] Third-party commits unchanged; reporters and testers credited
-- [ ] Commits: human Signed-off-by only; no agent trailers of any kind
-- [ ] Tested on the affected hardware; no regression
+<details><summary>Evidence</summary>
 
-<!-- If an agent helped, keep an Assisted-by line at the end of the body naming the model or tool (exact wording/punctuation is flexible). Otherwise delete it. -->
-Assisted-by: LLM (<Model>)
+<!-- Commands, results tables, logs, CI runs, regression request links, exact SHAs. -->
+
+</details>
