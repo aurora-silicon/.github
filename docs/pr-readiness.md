@@ -27,8 +27,11 @@ how maintainers use it is the [maintainer handbook](https://github.com/aurora-si
 
 ## When it runs
 
-- On every push, edit, label change, review and comment on a pull request (that pull request only).
-- Every 30 minutes for all open pull requests, incrementally: only pull requests whose head,
+- On a push, a title/body/base edit, a `hold`/`blocked`/`hw-row-ok` label change, a review or a
+  comment on a pull request (that pull request only). Other events are skipped without a runner,
+  and a burst on one pull request collapses into one pending run.
+- On a schedule for all open pull requests (linux and mesa every 30 minutes, other repositories
+  every 3 hours at a minute picked from the repository name), incrementally: only pull requests whose head,
   CI state, mergeability, review decision, labels or update time changed are read again. A run
   works for at most 12 minutes; the rest continue in the next run.
 - Drafts are skipped. Its comment is created when something happens on a pull request (or for
