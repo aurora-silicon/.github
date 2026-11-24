@@ -4,12 +4,13 @@ Aurora Silicon is run by its **Owners**, Ryan Murray ([@RyanTheTide](https://git
 
 | Role | Who | May |
 | --- | --- | --- |
-| Owner | Ryan, Dj | everything; alone cut `v*` releases and hotfixes, change settings and rulesets, add or remove people |
-| Core | `core` and `aurora-dev` teams | review, approve and merge PRs that meet the merge policy; push `feat/` `fix/` `wip/` branches; open `rebase/` PRs |
-| Maintainer | `omarchy-m` team | review, approve and merge PRs that meet the merge policy; triage; push `feat/` `fix/` `wip/` branches; run workflows |
+| Owner | Ryan, Dj | everything; alone cut `v*` releases and hotfixes, change settings, rulesets, secrets and access |
+| Core | `core` team | review, approve and merge PRs that meet the merge policy on every product repo (the website: its designated owners); triage; run workflows; run the stable gate |
+| Omarchy Mac maintainer | `omarchy-m` team | review, approve and merge PRs that meet the merge policy on the repos Omarchy ships or consumes; triage; push `feat/` `fix/` `wip/` branches; run workflows |
+| Aurora Dev | `aurora-dev` team | develop: push `feat/` `fix/` `wip/` branches, open PRs, review, re-run CI, request lab rows; **do not merge** into default branches (enforced by rulesets; the repos still pending are listed in `access-tiers.md`) |
 | Contributor | everyone | open issues and PRs from a fork |
 
-Nobody merges their own PR without a non-author review, merges runtime code without a hardware row, pushes to `main`, or moves a release tag.
+Core and Omarchy Mac approvals are the ones that unlock a merge (code-owner review). Nobody merges their own PR without a non-author review, merges runtime code without a hardware row, pushes to a default branch, or moves a release tag. Which team holds which role on which repository: [`policy/access-tiers.md`](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/access-tiers.md). How to review and merge: the [handbook](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/review-and-merge-handbook.md).
 
 The full text, including exactly what GitHub enforces and what is policy only, is [`policy/governance-and-roles.md`](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/governance-and-roles.md). The merge gate is [`policy/merge-policy.md`](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/merge-policy.md); branches and releases are [`policy/branching-and-releases.md`](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/branching-and-releases.md).
 
@@ -17,10 +18,9 @@ Policy changes: open a PR against [`aurora-silicon/agent-guidelines`](https://gi
 
 ## CODEOWNERS
 
-GitHub has no organisation-wide CODEOWNERS file; each repository carries its own `.github/CODEOWNERS`. Use it only for files whose change affects everyone, so that day-to-day code review is not gated on two people:
+GitHub has no organisation-wide CODEOWNERS file; each repository carries its own `.github/CODEOWNERS`. It does two jobs:
 
-- `.github/` (workflows, templates, CODEOWNERS itself), release and packaging workflows;
-- the default build configuration (for the kernel: `arch/arm64/configs/aurora_defconfig`);
-- `RELEASES.md`, `CONTRIBUTING.md` and other policy text in the repo.
+1. **Routing, and whose approval counts.** The first line, `* @aurora-silicon/core @aurora-silicon/omarchy-m` (only `@aurora-silicon/core` where Omarchy Mac has no role), requests a review from the teams that merge, and with "require review from code owners" on in the default-branch ruleset, any **one** approval from either team satisfies it. Area lines may add reviewers who know the code (for example GPU paths), but always keep both teams on the line so routing never turns into a two-person gate.
+2. **Owner review for files that affect everyone.** Later, more specific lines (the last match wins) give `@RyanTheTide @DjDeveloperr` the paths that need an Owner: `.github/` (workflows, templates, CODEOWNERS itself), release and packaging workflows, the default build configuration (kernel: `arch/arm64/configs/aurora_defconfig`), `RELEASES.md`, `CONTRIBUTING.md` and other policy text.
 
-List the Owners for those paths (`@RyanTheTide @DjDeveloperr`) and, where a repo has an area owner, add them for their area. Turn on "require review from code owners" in the repo's `main` ruleset; Owners bypass it through a pull request, so their own merges are not blocked. Do not list a team or person who lacks write access: GitHub ignores them.
+Owners and Core bypass code-owner review only through a pull request, when the merge policy holds. Do not list a team or person who lacks write access: GitHub ignores them. `tools/gh-access-apply.sh` in agent-guidelines applies the rulesets; the CODEOWNERS file is added by a normal PR.
