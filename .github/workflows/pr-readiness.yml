@@ -2,8 +2,9 @@ name: pr-readiness
 
 # Reusable merge-readiness workflow for every Aurora Silicon repository.
 # Keeps one sticky comment and the readiness labels (ready-to-merge,
-# needs-review, needs-hw-row, changes-requested, blocked, needs-template,
-# area:*, blast:*, door:*) on each open pull request.
+# needs-review, needs-hw-row, changes-requested, ci-failing, merge-conflict, needs-template,
+# area:*, blast:*, door:*) on each open pull request. The human holds
+# (hold, blocked) are read, never set or removed.
 # Rules: https://github.com/aurora-silicon/agent-guidelines/blob/main/docs/MAINTAINER-HANDBOOK.md
 # Callers: copy workflow-templates/pr-readiness.yml into the repository.
 #
