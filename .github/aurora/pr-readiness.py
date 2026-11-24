@@ -409,12 +409,16 @@ def review_state(pr, head):
     # Agents that share the author's account post their verdict as a review
     # or comment (policy/pr-review.md). Only members' verdicts count, only a
     # line with one verdict (not the template's list), latest one wins.
-    cands = [(r.get("submittedAt") or "", r.get("authorAssociation"), r["body"] or "", r["url"], (r.get("commit") or {}).get("oid", ""))
-             for r in pr["reviews"]["nodes"]]
-    cands += [(c.get("createdAt") or "", c.get("authorAssociation"), c["body"] or "", c["url"], "")
+    # The author's own account never approves its PR (merge-policy.md 4),
+    # so its MERGE verdicts are ignored; its FINISH, HOLD and CLOSE verdicts
+    # (an agent sharing the account reporting blockers) still count.
+    cands = [(r.get("submittedAt") or "", r.get("authorAssociation"), r["body"] or "", r["url"], (r.get("commit") or {}).get("oid", ""),
+              (r.get("author") or {}).get("login") == author) for r in pr["reviews"]["nodes"]]
+    cands += [(c.get("createdAt") or "", c.get("authorAssociation"), c["body"] or "", c["url"], "",
+               (c.get("author") or {}).get("login") == author)
               for c in pr["comments"]["nodes"] if MARKER not in (c["body"] or "")]
     agent = None
-    for when, assoc, body, url, oid in sorted(cands, key=lambda c: c[0]):
+    for when, assoc, body, url, oid, own in sorted(cands, key=lambda c: c[0]):
         if assoc not in TRUSTED:
             continue
         text = strip_comments(body)
@@ -423,13 +427,15 @@ def review_state(pr, head):
             line = text[m.start():end if end >= 0 else len(text)]
             if "|" in line:
                 continue
+            if own and m.group(1).upper() == "MERGE":
+                continue
             if oid == head or head_prefix_in(line, head):
                 agent = (m.group(1).upper(), url)
     if decision == "APPROVED" or (decision is None and trusted):
         names = ", ".join(sorted({w for w, _ in approvals})) or "approved"
         state = ("ok", f"approved by {names}")
     elif agent and agent[0] == "MERGE":
-        state = ("ok", f"[review verdict MERGE at `{short(head)}`]({agent[1]}); no GitHub approval, so an Owner or Core member merges with `--admin`")
+        state = ("ok", f"[review verdict MERGE at `{short(head)}`]({agent[1]}); no GitHub approval yet, so approve it or merge through the bypass (`--admin`)")
     elif approvals:
         state = ("missing", "approved by " + ", ".join(w for w, _ in approvals) + ", but GitHub does not count it yet (code owner from Core or Omarchy Mac needed, or approval went stale)")
     else:
