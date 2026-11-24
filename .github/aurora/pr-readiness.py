@@ -526,7 +526,7 @@ def evaluate(pr, rules, prev_hwok):
     lines += ["", "Areas: " + (", ".join(f"`{a}`" for a in extra) if extra else "none matched in CODEOWNERS")]
     if ready:
         lines.append(f"Merge: `gh pr merge {pr['number']} --merge` (Owners and Core through the bypass: add `--admin`).")
-    lines += ["", f"<sub>Updated by [pr-readiness](https://github.com/aurora-silicon/.github/blob/main/.github/workflows/pr-readiness.yml) on every push, edit and review, and every 30 minutes. Rules: [merge policy]({POLICY}/policy/merge-policy.md) · [labels](https://github.com/aurora-silicon/.github/blob/main/docs/pr-readiness.md).</sub>"]
+    lines += ["", f"<sub>Updated by [pr-readiness](https://github.com/aurora-silicon/.github/blob/main/.github/workflows/pr-readiness.yml) on pushes, edits, reviews and comments, and on a schedule. Rules: [merge policy]({POLICY}/policy/merge-policy.md) · [labels](https://github.com/aurora-silicon/.github/blob/main/docs/pr-readiness.md).</sub>"]
     return want, labels, "\n".join(lines), hwok_head, new_pr
 
 
