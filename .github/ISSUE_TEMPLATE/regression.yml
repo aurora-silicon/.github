@@ -1,0 +1,23 @@
+name: Regression
+description: Something that worked before stopped working.
+labels: [bug, regression]
+body:
+  - type: input
+    id: good
+    attributes: {label: Last good, placeholder: "fleet85 / main a3d477d0"}
+    validations: {required: true}
+  - type: input
+    id: bad
+    attributes: {label: First bad, placeholder: "fleet87 / main 04e94d27"}
+    validations: {required: true}
+  - type: input
+    id: mac
+    attributes: {label: Mac(s)}
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes: {label: What changed, description: "One or two sentences."}
+    validations: {required: true}
+  - type: textarea
+    id: evidence
+    attributes: {label: Evidence, render: shell}

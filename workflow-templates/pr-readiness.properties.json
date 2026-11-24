@@ -1,0 +1,6 @@
+{
+  "name": "Aurora PR readiness",
+  "description": "Merge-readiness comment and labels (ready-to-merge, needs-review, needs-hw-row, ...) on every open pull request.",
+  "iconName": "octicon git-pull-request",
+  "categories": ["Automation"]
+}

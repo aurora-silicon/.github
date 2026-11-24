@@ -1,0 +1,18 @@
+name: Bring-up
+description: A feature or device that isn't supported yet.
+labels: [bring-up]
+body:
+  - type: textarea
+    id: goal
+    attributes: {label: Goal, description: "What should work, on which Macs, and how macOS behaves."}
+    validations: {required: true}
+  - type: textarea
+    id: state
+    attributes: {label: Current state, description: "What works, what doesn't, what's known."}
+    validations: {required: true}
+  - type: textarea
+    id: plan
+    attributes: {label: Plan / open questions}
+  - type: textarea
+    id: evidence
+    attributes: {label: Evidence, description: "Traces, logs, links.", render: shell}

@@ -1,0 +1,80 @@
+name: pr-text
+
+# Reusable PR text check for every Aurora Silicon repository: the 'Tested:'
+# and 'Risk:' lines of agent-guidelines policy/pr-structure.md, and no AI
+# attribution in the title, body or the author's own commits.
+# The logic is the pr-text mode of .github/aurora/agent-policy.sh: the
+# calling repository's copy on its default branch when it has one, else
+# the canonical copy in aurora-silicon/mesa. Never runs PR code.
+# Callers: copy workflow-templates/pr-text.yml into the repository.
+
+on:
+  workflow_call:
+    inputs:
+      since:
+        description: PRs created before this time get warnings only
+        type: string
+        default: "2026-11-25T00:00:00Z"
+
+permissions: {}
+
+jobs:
+  pr-text:
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Policy script of this repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .repo-policy
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github/aurora
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Canonical policy script
+        uses: actions/checkout@v7
+        with:
+          repository: aurora-silicon/mesa
+          ref: aurora-wip
+          path: .canon-policy
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github/aurora
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Collect the author's commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: >-
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" --paginate
+          --jq '.[] | select(.author.login == env.AUTHOR) | "commit \(.sha)\n\(.commit.message)"'
+          > "$RUNNER_TEMP/commits"
+
+      - name: Check the pull request text
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_CREATED: ${{ github.event.pull_request.created_at }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          STRUCTURE_SINCE: ${{ inputs.since }}
+          COMMITS_FILE: ${{ runner.temp }}/commits
+        run: |
+          script=.repo-policy/.github/aurora/agent-policy.sh
+          if ! grep -q '^pr-text)' "$script" 2>/dev/null; then
+            script=.canon-policy/.github/aurora/agent-policy.sh
+          fi
+          if ! grep -q '^pr-text)' "$script" 2>/dev/null; then
+            echo "::notice::no agent-policy.sh with a pr-text mode yet"
+            exit 0
+          fi
+          bash "$script" pr-text

@@ -1,0 +1,74 @@
+name: pr-readiness
+
+# Reusable merge-readiness workflow for every Aurora Silicon repository.
+# Keeps one sticky comment and the readiness labels (ready-to-merge,
+# needs-review, needs-hw-row, changes-requested, blocked, needs-template,
+# area:*, blast:*, door:*) on each open pull request.
+# Rules: https://github.com/aurora-silicon/agent-guidelines/blob/main/docs/MAINTAINER-HANDBOOK.md
+# Callers: copy workflow-templates/pr-readiness.yml into the repository.
+#
+# It reads pull requests through the API only and never checks out or
+# runs pull request code, so it is safe under pull_request_target.
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: Pull request number to evaluate; empty = sweep every open pull request
+        type: string
+        default: ""
+      cutoff:
+        description: PRs created before this time are not failed for the PR body structure
+        type: string
+        default: "2026-11-25T00:00:00Z"
+      tool-ref:
+        description: Ref of aurora-silicon/.github that holds pr-readiness.py
+        type: string
+        default: main
+
+permissions: {}
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: read
+    steps:
+      - name: Fetch the readiness script
+        uses: actions/checkout@v7
+        with:
+          repository: aurora-silicon/.github
+          ref: ${{ inputs.tool-ref }}
+          path: .aurora-readiness
+          sparse-checkout: .github/aurora/pr-readiness.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Restore the sweep state
+        if: inputs.pr == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: .readiness-state.json
+          key: pr-readiness-${{ github.run_id }}
+          restore-keys: pr-readiness-
+
+      - name: Update readiness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          CUTOFF: ${{ inputs.cutoff }}
+          STATE_FILE: ${{ inputs.pr == '' && '.readiness-state.json' || '' }}
+        run: python3 .aurora-readiness/.github/aurora/pr-readiness.py
+
+      - name: Save the sweep state
+        if: always() && inputs.pr == ''
+        uses: actions/cache/save@v4
+        with:
+          path: .readiness-state.json
+          key: pr-readiness-${{ github.run_id }}

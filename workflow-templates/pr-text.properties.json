@@ -1,0 +1,6 @@
+{
+  "name": "Aurora PR text",
+  "description": "Checks the PR's Tested and Risk lines and rejects AI attribution in PR text and commits.",
+  "iconName": "octicon checklist",
+  "categories": ["Automation"]
+}
