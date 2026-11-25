@@ -65,10 +65,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: >-
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" --paginate
-          --jq '.[] | select(.author.login == env.AUTHOR) | "commit \(.sha)\n\(.commit.message)"'
-          > "$RUNNER_TEMP/commits"
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          # Owner-reviewed lists contain only commits already published before
+          # enforcement. Each list applies to one repository, PR and head.
+          published=".canon-policy/.github/aurora/published-history/$GITHUB_REPOSITORY/$PR/$HEAD_SHA.txt"
+          if [ ! -f "$published" ]; then
+            published=/dev/null
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" --paginate |
+            jq -rs --rawfile published "$published" '
+              ($published | split("\n")) as $excluded |
+              .[][] | select(.author.login == env.AUTHOR) |
+              select(.sha as $sha | $excluded | index($sha) == null) |
+              "commit \(.sha)\n\(.commit.message)"
+            ' > "$RUNNER_TEMP/commits"
 
       - name: Check the pull request text
         env:
