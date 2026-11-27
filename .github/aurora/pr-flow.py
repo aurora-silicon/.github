@@ -845,7 +845,7 @@ def main():
     if merged_log and not DRY:
         with open(led, "a") as f:
             for k, url, how, sha in merged_log:
-                f.write(f"{NOW.isoformat()}\t{k}\t{url}\t{how}\t{sha}\n")
+                f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()}\t{k}\t{url}\t{how}\t{sha}\n")
         state.setdefault("outbox_merged", []).extend(url for _, url, _, _ in merged_log)
     midnight = dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     flow_today = 0
