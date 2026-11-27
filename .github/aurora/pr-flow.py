@@ -448,7 +448,7 @@ def _merge_actions(ev, st, merged_log):
         r = write("merge", key, lambda: call("PUT", f"/repos/{ORG}/{ev['repo']}/pulls/{ev['n']}/merge",
                                               {"merge_method": "merge", "sha": ev["head"]}, kind="write"))
         if r == "ok":
-            merged_log.append((key, ev["url"], "merged", ev["head"]))
+            merged_log.append((key, ev["url"], "merged by pr-flow", ev["head"]))
             st["merged_by_flow"] = NOW.isoformat()
         return
     if not ev["auto"] and ev["mss"] == "BLOCKED":
@@ -692,7 +692,7 @@ def render_queue(evs, state, m, flow_merges):
         "",
         f"Updated {now_l.strftime('%Y-%m-%d %H:%M %Z')} · {len(evs)} open non-draft PRs · tool: `.github/aurora/pr-flow.py` ([docs](https://github.com/{ORG}/.github/blob/main/docs/pr-flow.md))",
         "",
-        f"- **Merged today:** {t.get('merged', '?')} ({t.get('same_day', '?')} opened and merged within 24 h; by pr-flow: {flow_merges['today']}) · last 7 days: {y.get('merged', '?')}",
+        f"- **Merged today:** {t.get('merged', '?')} ({t.get('same_day', '?')} opened and merged within 24 h; by pr-flow: {flow_merges['today']}) · last 7 days: {str(y.get('merged', '?')) + ('+ (search cap)' if y.get('merged') == 1000 else '')}",
         f"- **Median today:** request -> first review {t.get('req_to_review', 'n/a')} · first review -> merge {t.get('review_to_merge', 'n/a')} · open -> merge {t.get('open_to_merge', 'n/a')} (7 days: {y.get('req_to_review', 'n/a')} / {y.get('review_to_merge', 'n/a')} / {y.get('open_to_merge', 'n/a')})",
         f"- **Oldest open:** " + (f"[{oldest['repo']}#{oldest['n']}]({oldest['url']}) {fmt_age(ts(oldest['created']))} ({oldest['author']})" if oldest else "none"),
         f"- **Waiting:** " + " · ".join(f"{k} {by[k]}" for k in order if k in by) + f" · reviews past the {CFG['sla_hours']} h SLA: {overdue}",
