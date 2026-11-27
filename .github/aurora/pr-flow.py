@@ -245,6 +245,46 @@ def excluded(repo, n, labels, author):
     return ""
 
 
+OWED_RE = re.compile(r"\brows?\b[^.\n]{0,40}\b(still )?(owed|pending|outstanding|missing|to come|to run|not (yet )?(run|posted|done))|\b(still to run|rows? owed|owed rows?)\b", re.I)
+
+
+def strict_rows(pr, repo, head, labels):
+    """Stricter than the readiness row check, for arming and merging (ORCH5 16:16, binding).
+
+    Returns '' when the PR may be armed/merged, else why not:
+    - the PR says rows are owed ('rows still owed', 'Still to run', a 'Not yet:' that names rows,
+      hardware or a Mac);
+    - no line with the head SHA, a Mac and a result (body or comment);
+    - repos in regression_repos need head-SHA rows on two different Macs (target + regression).
+    'No runtime change.' in Tested and the maintainer label hw-row-ok skip the Mac count, not the owed check.
+    """
+    sec, _, _, _ = R.structure(pr["body"] or "")
+    tested, notyet = sec.get("tested", ""), sec.get("not yet", "")
+    no_runtime = re.search(r"no runtime (change|effect)", tested, re.I)
+    if OWED_RE.search(tested) or (notyet and (re.search(r"\b(rows?|hardware|regression)\b", notyet, re.I) or R.MAC_RE.search(notyet))
+                                  and not re.fullmatch(r"\W*(nothing|none|n/?a)\W*", notyet, re.I)):
+        return "rows owed (Tested / Not yet)"
+    if OWED_RE.search(R.strip_comments(pr["body"] or "").split("<details", 1)[0]):
+        return "rows owed (PR text)"
+    if no_runtime:
+        return ""
+    if R.HWOK_LABEL in labels:
+        return ""
+    macs = set()
+    texts = [R.strip_comments(pr["body"] or "")] + [R.strip_comments(c.get("body") or "") for c in pr["comments"]["nodes"] if R.MARKER not in (c.get("body") or "")]
+    for t in texts:
+        for line in t.splitlines():
+            if R.is_row(line, head):
+                names = [m.group(0).lower().replace(" ", "") for m in R.MAC_RE.finditer(line)]
+                boards = [x for x in names if re.fullmatch(r"j\d{3}[a-z]{0,2}", x)]
+                macs.update(boards or names[:1])  # 'J413 M2 Air' is one Mac
+    if not macs:
+        return "no hardware row at the head SHA"
+    if repo in CFG.get("regression_repos", []) and len(macs) < 2:
+        return f"head-SHA row on one Mac only ({', '.join(sorted(macs))}); needs the regression row on a second Mac"
+    return ""
+
+
 def evaluate(pr):
     """Readiness verdict plus what pr-flow needs. Pure: no GitHub writes."""
     head = pr["headRefOid"]
@@ -275,6 +315,9 @@ def evaluate(pr):
         blockers.append("base")
     if excl:
         blockers.append("excluded")
+    rows_why = strict_rows(pr, repo, head, labels) if "hw-row" not in blockers else "no hardware row at the head SHA"
+    if rows_why and "hw-row" not in blockers:
+        blockers.append("hw-row")
     need_review = "needs-review" in want
     reviews = [r for r in pr["reviews"]["nodes"] if r.get("author") and r["author"]["login"] != author and r.get("submittedAt")]
     last_by = {}
@@ -288,6 +331,8 @@ def evaluate(pr):
     elif CFG.get("manual_title_re") and re.search(CFG["manual_title_re"], pr["title"], re.I):
         manual = "boot object / Stage 1"
     return {
+        "v": EV_VERSION,
+        "rows_why": rows_why,
         "manual": manual,
         "repo": repo, "n": pr["number"], "url": pr["url"], "title": " ".join(pr["title"].split())[:70],
         "author": author, "ours": author in CFG["our_accounts"], "member": author in MEMBERS or pr.get("authorAssociation") in ("OWNER", "MEMBER", "COLLABORATOR"),
@@ -398,7 +443,10 @@ def owner_lane(ev, index):
     for prefix, lane in CFG["branch_lanes"].items():
         if ev["branch"].startswith(prefix):
             return lane
-    return index.get(k) or CFG["fallback_lane"]
+    if index.get(k):
+        return index[k]
+    lanes = CFG.get("fallback_lanes") or [CFG["fallback_lane"]]
+    return lanes[ev["n"] % len(lanes)]
 
 
 def lane_append(lane, lines):
@@ -418,9 +466,42 @@ def oneline(text, n=280):
 
 # ---------------------------------------------------------------- actions
 
+EV_VERSION = 2  # bump when the arm/merge gate changes: older cached evaluations never arm or merge
+HOLDS = {}  # PR key -> lane line that holds it (filled per run by lane_holds)
+HOLD_RE = re.compile(r"\bHOLD\b|do ?n[o']t merge|do-not-merge|\bFAIL(ED|S|URES?)?\b|\bregress(ion|ed|es)\b|\breverted?\b|rows? owed", re.I)
+CLEAR_RE = re.compile(r"\bverdict\W{0,8}MERGE\b|\bPASS(ED)?\b.*\b(no|0) (regressions?|fail)|\bmerge[- ]ready\b|\bhold (lifted|released|cleared)\b", re.I)
+
+
+def lane_holds():
+    """A lane's latest line about a PR says HOLD / FAIL / regression / revert / rows owed -> do not arm or merge."""
+    rx = re.compile(r"github\.com/" + ORG + r"/([\w.-]+)/pull/(\d+)|\b([a-z][\w.-]+)#(\d{2,5})\b")
+    latest = {}
+    for path in CFG.get("hold_scan_files", []):
+        try:
+            lines = open(path, errors="replace").read().splitlines()[-CFG.get("hold_scan_lines", 600):]
+        except OSError:
+            continue
+        for line in lines:
+            if "PR-FLOW ->" in line:
+                continue  # our own assignment lines
+            for m in rx.finditer(line):
+                repo, n = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+                latest[f"{repo}#{n}"] = (os.path.basename(path), line)
+    HOLDS.clear()
+    for k, (f, line) in latest.items():
+        if HOLD_RE.search(line) and not CLEAR_RE.search(line):
+            HOLDS[k] = f"{f}: {' '.join(line.split())[:160]}"
+
+
 def can_arm(ev):
     """Everything but the approval holds, and auto-merge exists for this repo."""
+    if f"{ev['repo']}#{ev['n']}" in HOLDS:
+        return False
     return (not ev["private"] and not ev["blockers"] and not ev.get("manual")) and ev["ci"] in ("ok", "none")
+
+
+ARMED_PER_REPO = {}
+repo_actions = {}  # repo -> merges/arms this run (serialize: two CLEAN PRs can still break the tip together)
 
 
 def do_merge_actions(ev, st, merged_log):
@@ -437,7 +518,9 @@ def _merge_actions(ev, st, merged_log):
     # GitHub computes mergeability lazily: UNKNOWN alone is no reason to disarm.
     keep = dict(ev, blockers=[b for b in ev["blockers"] if b != "mergeable?"])
     if ev["auto"] and armed and (armed["head"] != ev["head"] or not can_arm(keep)):
-        why = "head moved" if armed["head"] != ev["head"] else ",".join(ev["blockers"]) or ev["ci"]
+        why = ("head moved" if armed["head"] != ev["head"] else
+               ",".join(ev["blockers"] + ([ev["rows_why"]] if ev.get("rows_why") else [])) or
+               ("lane hold: " + HOLDS[key] if key in HOLDS else ev["ci"]))
         if write("disarm", f"{key} ({why})", lambda: gql(
                 "mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}", kind="write", id=ev["id"])) in ("ok", "dry"):
             st.pop("armed", None)
@@ -446,13 +529,19 @@ def _merge_actions(ev, st, merged_log):
         st.pop("armed", None)  # someone disarmed it, or GitHub did after a push
     if not can_arm(ev):
         return
+    serial = ev["repo"] in CFG.get("serial_repos", [])
+    if repo_actions.get(ev["repo"], 0) >= CFG.get("merges_per_repo_per_run", 1):
+        return
     if ev["ready"] and ev["mss"] in ("CLEAN", "HAS_HOOKS") and ev["decision"] in ("APPROVED", None):
+        repo_actions[ev["repo"]] = repo_actions.get(ev["repo"], 0) + 1
         r = write("merge", key, lambda: call("PUT", f"/repos/{ORG}/{ev['repo']}/pulls/{ev['n']}/merge",
                                               {"merge_method": "merge", "sha": ev["head"]}, kind="write"))
         if r == "ok":
             merged_log.append((key, ev["url"], "merged by pr-flow", ev["head"]))
             st["merged_by_flow"] = NOW.isoformat()
         return
+    if serial and ARMED_PER_REPO.get(ev["repo"], 0) >= 1:
+        return  # serial repos: one armed PR at a time, so approvals can't land two untested-together merges
     if not ev["auto"] and ev["mss"] == "BLOCKED":
         # Only BLOCKED (by the review rule) PRs are armed: a CLEAN PR that is
         # not ready would merge at once without the review it still needs.
@@ -461,12 +550,15 @@ def _merge_actions(ev, st, merged_log):
             kind="write", id=ev["id"], h=ev["head"]))
         if r in ("ok", "dry"):
             st["armed"] = {"head": ev["head"], "at": NOW.isoformat()}
+            ARMED_PER_REPO[ev["repo"]] = ARMED_PER_REPO.get(ev["repo"], 0) + 1
 
 
 def needs_of(ev, st):
     """(needs, who) for the queue."""
     if ev["excluded"]:
         return "hold", ev["excluded"]
+    if f"{ev['repo']}#{ev['n']}" in HOLDS:
+        return "hold", "lane: " + HOLDS[f"{ev['repo']}#{ev['n']}"].replace("|", "/")
     b = ev["blockers"]
     if "base" in b:
         return "base", f"stacked on `{ev['base']}`: retarget to the default branch after its base lands"
@@ -487,7 +579,7 @@ def needs_of(ev, st):
     if ev["need_review"]:
         return ("review (armed)" if ev["auto"] else "review"), who
     if "hw-row" in b:
-        return "hw-row", ev["author"]
+        return "hw-row", f"{ev['author']} ({ev.get('rows_why') or 'row'})"
     if "template" in b:
         return "template", ev["author"]
     if "ci-pending" in b or "mergeable?" in b:
@@ -814,7 +906,7 @@ def main():
         st = state["prs"].setdefault(k, {})
         roll = (((p["commits"]["nodes"] or [{}])[0].get("commit") or {}).get("statusCheckRollup") or {}).get("state")
         fp = "|".join(str(x) for x in (p["headRefOid"], p["updatedAt"], roll, p["mergeable"], p["reviewDecision"], sorted(l["name"] for l in p["labels"]["nodes"])))
-        if st.get("fp") != fp or not st.get("ev") or hours(ts(st.get("ev_at", "2000-01-01T00:00:00+00:00"))) > CFG["refresh_h"]:
+        if st.get("fp") != fp or not st.get("ev") or st["ev"].get("v") != EV_VERSION or hours(ts(st.get("ev_at", "2000-01-01T00:00:00+00:00"))) > CFG["refresh_h"]:
             if time.time() - start > detail_budget:
                 if st.get("ev"):
                     evs.append(st["ev"])
@@ -830,8 +922,21 @@ def main():
             st["fp"], st["ev"], st["ev_at"] = fp, ev, NOW.isoformat()
         evs.append(st["ev"])
 
+    lane_holds()
+    extra = set()
+    for ev in sorted(evs, key=lambda e: state["prs"][f"{e['repo']}#{e['n']}"].get("armed", {}).get("at", "")):
+        st = state["prs"][f"{ev['repo']}#{ev['n']}"]
+        if ev["auto"] and st.get("armed") and st["armed"]["head"] == ev["head"]:
+            if ev["repo"] in CFG.get("serial_repos", []) and ARMED_PER_REPO.get(ev["repo"], 0) >= 1:
+                extra.add(f"{ev['repo']}#{ev['n']}")  # serial repo: keep only the oldest armed
+                continue
+            ARMED_PER_REPO[ev["repo"]] = ARMED_PER_REPO.get(ev["repo"], 0) + 1
     for ev in evs:
         st = state["prs"][f"{ev['repo']}#{ev['n']}"]
+        if ev.get("v") != EV_VERSION:
+            ev = dict(ev, blockers=list(ev["blockers"]) + ["stale-eval"])
+        if f"{ev['repo']}#{ev['n']}" in extra:
+            ev = dict(ev, blockers=list(ev["blockers"]) + ["serial"])  # never arm/merge on an old evaluation; disarms ours
         if do_merge_actions(ev, st, merged_log):
             st["fp"] = ""  # re-read next run so the queue shows GitHub's view
 
