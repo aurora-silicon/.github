@@ -517,6 +517,8 @@ def _merge_actions(ev, st, merged_log):
     # Disarm what we armed when the PR stopped qualifying or the head moved.
     # GitHub computes mergeability lazily: UNKNOWN alone is no reason to disarm.
     keep = dict(ev, blockers=[b for b in ev["blockers"] if b != "mergeable?"])
+    if ev["auto"] and not armed and ev.get("auto_by") in CFG["our_accounts"] and not can_arm(keep):
+        armed = {"head": ev["head"]}  # armed by our account outside pr-flow's state: the binding gate still applies
     if ev["auto"] and armed and (armed["head"] != ev["head"] or not can_arm(keep)):
         why = ("head moved" if armed["head"] != ev["head"] else
                ",".join(ev["blockers"] + ([ev["rows_why"]] if ev.get("rows_why") else [])) or
