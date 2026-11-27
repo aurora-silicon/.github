@@ -434,7 +434,9 @@ def _merge_actions(ev, st, merged_log):
     key = f"{ev['repo']}#{ev['n']}"
     armed = st.get("armed")
     # Disarm what we armed when the PR stopped qualifying or the head moved.
-    if ev["auto"] and armed and (armed["head"] != ev["head"] or not can_arm(ev)):
+    # GitHub computes mergeability lazily: UNKNOWN alone is no reason to disarm.
+    keep = dict(ev, blockers=[b for b in ev["blockers"] if b != "mergeable?"])
+    if ev["auto"] and armed and (armed["head"] != ev["head"] or not can_arm(keep)):
         why = "head moved" if armed["head"] != ev["head"] else ",".join(ev["blockers"]) or ev["ci"]
         if write("disarm", f"{key} ({why})", lambda: gql(
                 "mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}", kind="write", id=ev["id"])) in ("ok", "dry"):
@@ -794,13 +796,13 @@ def main():
     merged_log = []
     for k in [k for k in state["prs"] if k not in open_keys]:
         st = state["prs"].pop(k)
-        if st.get("armed") or st.get("merged_by_flow"):
+        if st.get("armed") and not st.get("merged_by_flow"):  # direct merges are logged when made
             repo, n = k.split("#")
             try:
                 p = call("GET", f"/repos/{ORG}/{repo}/pulls/{n}")
                 if p.get("merged_at"):
                     by = (p.get("merged_by") or {}).get("login")
-                    how = "merged by pr-flow" if st.get("merged_by_flow") else ("auto-merged (armed by pr-flow)" if st.get("armed") else "merged")
+                    how = "auto-merged (armed by pr-flow)"
                     merged_log.append((k, p["html_url"], how, p.get("merge_commit_sha", "")))
             except RuntimeError as e:
                 log(f"{k}: {e}")
