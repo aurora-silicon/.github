@@ -466,7 +466,7 @@ def oneline(text, n=280):
 
 # ---------------------------------------------------------------- actions
 
-EV_VERSION = 2  # bump when the arm/merge gate changes: older cached evaluations never arm or merge
+EV_VERSION = 3  # bump when the arm/merge gate changes: older cached evaluations never arm or merge
 HOLDS = {}  # PR key -> lane line that holds it (filled per run by lane_holds)
 HOLD_RE = re.compile(r"\bHOLD\b|do ?n[o']t merge|do-not-merge|\bFAIL(ED|S|URES?)?\b|\bregress(ion|ed|es)\b|\breverted?\b|rows? owed", re.I)
 CLEAR_RE = re.compile(r"\bverdict\W{0,8}MERGE\b|\bPASS(ED)?\b.*\b(no|0) (regressions?|fail)|\bmerge[- ]ready\b|\bhold (lifted|released|cleared)\b", re.I)
@@ -491,6 +491,12 @@ def lane_holds():
     for k, (f, line) in latest.items():
         if HOLD_RE.search(line) and not CLEAR_RE.search(line):
             HOLDS[k] = f"{f}: {' '.join(line.split())[:160]}"
+
+
+def approved_at_head(ev):
+    """A non-author approval submitted on the head commit. Repos whose ruleset keeps approvals
+    after a push (mesa) would otherwise merge a forward-merged head on an old approval (mesa#700)."""
+    return any(r["state"] == "APPROVED" and r.get("oid") == ev["head"] for r in ev["reviews"].values())
 
 
 def can_arm(ev):
@@ -534,7 +540,7 @@ def _merge_actions(ev, st, merged_log):
     serial = ev["repo"] in CFG.get("serial_repos", [])
     if repo_actions.get(ev["repo"], 0) >= CFG.get("merges_per_repo_per_run", 1):
         return
-    if ev["ready"] and ev["mss"] in ("CLEAN", "HAS_HOOKS") and ev["decision"] in ("APPROVED", None):
+    if ev["ready"] and ev["mss"] in ("CLEAN", "HAS_HOOKS") and ev["decision"] in ("APPROVED", None) and approved_at_head(ev):
         repo_actions[ev["repo"]] = repo_actions.get(ev["repo"], 0) + 1
         r = write("merge", key, lambda: call("PUT", f"/repos/{ORG}/{ev['repo']}/pulls/{ev['n']}/merge",
                                               {"merge_method": "merge", "sha": ev["head"]}, kind="write"))

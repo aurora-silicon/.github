@@ -67,6 +67,17 @@ for name, repo, p, want_ok in cases:
     else:
         print(f"ok   {name}" + (f" ({why})" if why else ""))
 
+for name, revs, want in (
+        ("approval at head", {"dj": {"state": "APPROVED", "oid": HEAD}}, True),
+        ("approval before a forward-merge push (mesa#700)", {"satchlj": {"state": "APPROVED", "oid": "ce2b047c" + "0" * 32}}, False),
+        ("changes requested at head", {"dj": {"state": "CHANGES_REQUESTED", "oid": HEAD}}, False)):
+    got = F.approved_at_head({"head": HEAD, "reviews": revs})
+    if got != want:
+        fail += 1
+        print(f"FAIL {name}: got {got}, want {want}")
+    else:
+        print(f"ok   {name}")
+
 open(lane, "w").write(
     "- 15:28 PEER-ROWS: https://github.com/aurora-silicon/mesa/pull/1168 Neo J700 row: 12 FAIL, HOLD\n"
     "- 15:30 PEER-ROWS: mesa#680 Neo J700 PASS 213/213, 0 fail: no regressions\n"
