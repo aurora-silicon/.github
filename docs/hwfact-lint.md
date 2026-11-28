@@ -8,9 +8,11 @@ Rule (pre-pr-checklist.md): **no hardware fact as a literal; cite its source.** 
 | --- | --- | --- |
 | dB level | `0 dB`, `-41.8 dB` | the control's TLV |
 | frequency | `100 Hz` | matched tuning, DT, codec data |
-| sample rate | `48000` | PCM hw_params constraints, tuning |
-| hardware quantity | `amps: 2`, `volume_db = 0` | ALSA info, DT/ADT, tuning |
-| board or SoC list | `"j313"`, `"t8112"` | DT compatible, capability bits |
+| sample rate | `48000`, `48_000`, `48000u32`, `48000.0_f32` | PCM hw_params constraints, tuning |
+| hardware quantity | `amps: 2`, `const MAX_GAIN_DB: f32 = -6.0`, `#define AMP_CHANNELS 6` | ALSA info, DT/ADT, tuning |
+| board or SoC id in a string | `"j313"`, `"apple,t8132"`, `"J616sAP"` | DT compatible, capability bits |
+
+An assignment counts as a hardware quantity when its name has a word such as gain, volume, db, channels, amps, rate, ohms or temp (split on `_` and camelCase). Comments are skipped by file type; in C and DT sources a `#` line is a directive and is checked.
 
 Docs, test paths (`tests/`, `test_*`, `*_test.rs`, KUnit) and lock files are skipped.
 
@@ -22,7 +24,7 @@ Policy values (for example a safety margin the owner set) and interface constant
 max_db = -6  # hwfact-ok: policy, safety margin set by the owner on 2026-11-27
 ```
 
-Put the marker on the line itself or on the line above. A marker with no reason does not count. For a whole path, such as generated voicing assets, add it to `.hwfact-allow` at the repository root. The format is a glob, whitespace, then the reason:
+Put the marker on the line itself, or in a comment on the line above. A marker with no reason (empty, or punctuation only) does not count. For a whole path, such as generated voicing assets, add it to `.hwfact-allow` at the repository root. The format is a glob, whitespace, then the reason:
 
 ```
 firs/*/graph.json        voicing generated from the matched tuning; regenerated, not hand-edited

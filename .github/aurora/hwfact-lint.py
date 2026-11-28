@@ -34,11 +34,12 @@ Exit status: 0 when clean or in warning mode, 1 on findings with --strict,
 
 import argparse
 import fnmatch
+import io
 import json
 import re
 import sys
 
-MARKER = re.compile(r"hwfact-ok:\s*(\S.*)")
+MARKER = re.compile(r"hwfact-ok:\s*(.*)")
 
 # Only text that can carry configuration or code. Docs, licenses and lock
 # files are skipped.
@@ -49,42 +50,102 @@ SKIPPED = re.compile(r"(^|/)(LICENSE|COPYING|Cargo\.lock)$|\.md$|\.rst$|\.txt$")
 # Test fixtures and expected values are meant to be literals.
 TESTS = re.compile(r"(^|/)(tests?|fixtures?|testdata)/|(^|/)test_[^/]*$|_tests?\.(rs|py|c)$|kunit")
 
+# Comment syntax per file type. In C and DT sources '#' starts a preprocessor
+# directive (or a DT property such as #address-cells), not a comment.
+C_LIKE = re.compile(r"\.(c|h|rs|dts|dtsi|dtso|json)$")
+LUA = re.compile(r"\.lua$")
+COMMENT_C = re.compile(r"^\s*(?://|/\*|\*)")
+COMMENT_LUA = re.compile(r"^\s*--")
+COMMENT_HASH = re.compile(r"^\s*(?:#|;|//)")
+
+
+def comment_only(path, text):
+    if C_LIKE.search(path):
+        return bool(COMMENT_C.match(text))
+    if LUA.search(path):
+        return bool(COMMENT_LUA.match(text))
+    return bool(COMMENT_HASH.match(text))
+
+
+RATES = r"(?:8_?000|11_?025|16_?000|22_?050|32_?000|44_?100|48_?000|88_?200|96_?000|176_?400|192_?000)"
+NUM_SUFFIX = r"(?:\.0+)?(?:_?[uif](?:8|16|32|64|128|size)|[uUlL]+|f)?"
+
+# Identifier words that name a hardware quantity. An identifier is split on
+# '_' and camelCase, so 'OPERATING_VOLUME_DB', 'limitDb' and 'max_db' match
+# and 'dbus_timeout' does not.
+QUANTITY_WORDS = {
+    "gain", "volume", "vol", "ceiling", "db", "dbfs", "impedance", "ohm", "ohms", "thermal",
+    "temp", "temperature", "celsius", "ramp", "channel", "channels", "amp", "amps", "speaker",
+    "speakers", "slot", "slots", "rate", "fs", "hz", "khz", "mv", "voltage",
+}
+ASSIGN = re.compile(
+    r"(?:#\s*define\s+(?P<macro>[A-Za-z_]\w*)\s+\(?\s*[-+]?\d)"
+    r"|(?P<name>[A-Za-z_]\w*)[\"']?\s*(?::\s*[&\w<>\[\]; ]+?\s*=|[:=])\s*\[?\s*[-+]?\d"
+)
+STRING = re.compile(r"\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'")
+BOARD = re.compile(r"(?i)(?<![a-z0-9])(?:[jk]\d{3}[a-z]{0,2}?|t[68]\d{3})(?:ap)?(?![a-z0-9])")
+
+
+def words(ident):
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", ident).lower().split("_")
+    return {w for w in parts if w}
+
+
+def quantity(text):
+    for m in ASSIGN.finditer(text):
+        ident = m.group("macro") or m.group("name")
+        if words(ident) & QUANTITY_WORDS:
+            return m.group(0).strip()
+    return None
+
+
+def board(text):
+    for m in STRING.finditer(text):
+        body = m.group(1) if m.group(1) is not None else m.group(2)
+        b = BOARD.search(body)
+        if b:
+            return m.group(0)
+    return None
+
+
+def regex_rule(rx):
+    def check(text):
+        m = rx.search(text)
+        return m.group(0).strip() if m else None
+    return check
+
+
 RULES = [
     (
         "dB level",
-        re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?\s*_?(?:dB|dBFS|db)\b"),
+        regex_rule(re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?\s*_?(?:dB|dBFS|db)\b")),
         "read the ceiling and scale from the control's TLV (snd_ctl_elem_tlv / amixer cget)",
     ),
     (
         "frequency",
-        re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*_?k?Hz\b"),
+        regex_rule(re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*_?k?Hz\b")),
         "take filter corners and clocks from the matched tuning, DT or codec data, not a literal",
     ),
     (
         "sample rate",
-        re.compile(r"(?<![\w.])(?:8000|11025|16000|22050|32000|44100|48000|88200|96000|176400|192000)(?![\w.])"),
+        regex_rule(re.compile(r"(?<![\w.])" + RATES + NUM_SUFFIX + r"(?![\w.])")),
         "read it from the PCM's hw_params constraints or the matched tuning",
     ),
     (
         "hardware quantity",
-        re.compile(
-            r"(?i)\b\w*(?:gain|volume|ceiling|max_?db|impedance|ohms?|thermal|temp(?:erature)?|celsius"
-            r"|ramp|channels?|amps?|speakers?|slots?|rate)\w*\"?\s*[:=]\s*\[?\s*[-+]?\d"
-        ),
+        quantity,
         "read it from ALSA control info, PCM constraints, the DT or ADT, or the matched tuning",
     ),
     (
         "board or SoC list",
-        re.compile(r"(?i)[\"'](?:[jk]\d{3}[a-z]{0,2}|t[68]\d{3})[\"']"),
-        "decide from what the machine reports (DT compatible, capability bits), not a board list",
+        board,
+        "decide from what the machine reports (DT compatible, capability bits), not a board or SoC id",
     ),
 ]
 
-COMMENT_ONLY = re.compile(r"^\s*(?://|/?\*|#|--|;)")
-
 
 def added_lines(patch):
-    """Yield (new_line_number, text, previous_added_or_context_text)."""
+    """Yield (new_line_number, text, previous_line_text) for each added line."""
     new = 0
     prev = ""
     for raw in patch.splitlines():
@@ -93,7 +154,8 @@ def added_lines(patch):
             new = int(hunk[1])
             prev = ""
             continue
-        if raw.startswith("-"):
+        # '-' lines are not in the new file; '\ No newline at end of file' is not a line.
+        if raw.startswith("-") or raw.startswith("\\"):
             continue
         text = raw[1:]
         if raw.startswith("+"):
@@ -109,11 +171,9 @@ def load_allow(path):
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
-                line = line.split("#", 1)[0].strip() if line.lstrip().startswith("#") else line.strip()
-                if not line:
-                    continue
+                line = re.sub(r"(^|\s)#.*$", "", line).strip()
                 parts = line.split(None, 1)
-                if len(parts) == 2 and parts[1].strip():
+                if len(parts) == 2 and re.search(r"[A-Za-z]", parts[1]):
                     globs.append(parts[0])
     except FileNotFoundError:
         pass
@@ -121,8 +181,9 @@ def load_allow(path):
 
 
 def has_reason(text):
+    # A reason has words in it; '-' or an empty marker does not count.
     m = MARKER.search(text)
-    return bool(m and m.group(1).strip())
+    return bool(m and len(re.findall(r"[A-Za-z]{2,}", m.group(1))) >= 2)
 
 
 def lint(files, allow):
@@ -137,67 +198,114 @@ def lint(files, allow):
         if any(fnmatch.fnmatch(path, g) for g in allow):
             continue
         for line, text, prev in added_lines(patch):
-            if COMMENT_ONLY.match(text) or has_reason(text) or has_reason(prev):
+            if comment_only(path, text) or has_reason(text):
                 continue
-            for name, rx, hint in RULES:
-                m = rx.search(text)
-                if m:
-                    findings.append((path, line, name, m.group(0).strip(), hint))
+            # The line above only counts when it is a comment that carries the reason.
+            if comment_only(path, prev) and has_reason(prev):
+                continue
+            for name, check, hint in RULES:
+                value = check(text)
+                if value:
+                    findings.append((path, line, name, value, hint))
                     break
     return findings
 
 
-def report(findings, strict):
+def report(findings, strict, out=None):
+    out = out or sys.stdout
     level = "error" if strict else "warning"
     for path, line, name, value, hint in findings:
         msg = (
             f"'{value}' looks like a hardware fact ({name}) written as a literal: {hint}. "
             "If it is policy or an interface constant, say so with '# hwfact-ok: <reason>' "
-            "on the line or the line above, or list the path in .hwfact-allow with a reason."
+            "on the line or in a comment on the line above, or list the path in .hwfact-allow with a reason."
         )
-        print(f"::{level} file={path},line={line},title=hwfact-lint::{msg}")
-    print(f"hwfact-lint: {len(findings)} finding(s){' (warnings only)' if findings and not strict else ''}")
+        print(f"::{level} file={path},line={line},title=hwfact-lint::{msg}", file=out)
+    print(f"hwfact-lint: {len(findings)} finding(s){' (warnings only)' if findings and not strict else ''}", file=out)
     return 1 if findings and strict else 0
 
 
+def patch_of(lines):
+    return "@@ -0,0 +1,%d @@\n" % len(lines) + "\n".join("+" + l for l in lines)
+
+
+SELF_TEST = [
+    # (path, added line, expected rule or None)
+    ("src/a.rs", "let volume_db = 0.0;", "hardware quantity"),
+    ("src/a.py", "    rate = 48000", "sample rate"),
+    ("src/a.py", "boards = [\"j313\", \"j274\"]", "board or SoC list"),
+    ("src/a.py", "# 48000 in a comment is fine", None),
+    ("src/a.py", "max_db = -6  # hwfact-ok: policy, safety margin chosen by the owner", None),
+    ("src/a.py", "limit = -3 dB  # hwfact-ok:", "dB level"),
+    ("src/a.py", "limit = -3 dB  # hwfact-ok: -", "dB level"),
+    ("src/a.rs", "let name = \"Speaker Playback Volume\";", None),
+    ("conf/a.yaml", "channels: 6", "hardware quantity"),
+    ("src/a.py", "    hpf = biquad(100 Hz)", "frequency"),
+    ("src/a.py", "dbus_timeout = 5", None),
+    # Review of .github#17: each of these passed the first version.
+    ("src/codec.c", "#define DEFAULT_RATE 48000", "sample rate"),
+    ("src/codec.c", "#define MAX_GAIN_DB -6", "hardware quantity"),
+    ("src/codec.c", "#define LIMIT_STR \"-41.8 dB\"", "dB level"),
+    ("src/codec.c", "#define BOARD \"j313\"", "board or SoC list"),
+    ("src/codec.c", "#include <sound/soc.h>", None),
+    ("src/amp.rs", "const OPERATING_VOLUME_DB: f32 = 0.0;", "hardware quantity"),
+    ("src/amp.rs", "const MAX_GAIN: f64 = -6.0;", "hardware quantity"),
+    ("src/amp.rs", "static AMP_CHANNELS: usize = 6;", "hardware quantity"),
+    ("src/amp.rs", "const SAMPLE_RATE: u32 = 48_000;", "sample rate"),
+    ("src/amp.rs", "const TARGET_RATE: f32 = 48000.0;", "sample rate"),
+    ("src/dsp.rs", "let fs = 48000.0;", "sample rate"),
+    ("src/dsp.rs", "set_rate(48_000);", "sample rate"),
+    ("src/dsp.rs", "set_rate(48000u32);", "sample rate"),
+    ("src/dsp.rs", "set_rate(48000.0_f32);", "sample rate"),
+    ("src/dsp.c", "snd_pcm_set_rate(48000U);", "sample rate"),
+    ("src/guard.py", "limit_db = -41.8", "hardware quantity"),
+    ("src/guard.py", "target_db = 0.0", "hardware quantity"),
+    ("src/guard.py", "min_db = -60.0", "hardware quantity"),
+    ("src/guard.py", "db = -6.0", "hardware quantity"),
+    ("src/board.c", "if (of_machine_is_compatible(\"apple,j313\"))", "board or SoC list"),
+    ("src/board.c", "if (of_machine_is_compatible(\"apple,t8132\"))", "board or SoC list"),
+    ("src/board.c", "const char *s = \"j873g-speakers\";", "board or SoC list"),
+    ("src/board.c", "const char *m = \"J616sAP\";", "board or SoC list"),
+    ("src/board.c", "const char *m = \"ti,tas2770\";", None),
+]
+
+
 def self_test():
-    patch = "\n".join([
-        "@@ -1,2 +1,12 @@",
-        " context",
-        "+let volume_db = 0.0;",
-        "+    rate = 48000",
-        "+boards = [\"j313\", \"j274\"]",
-        "+# 48000 in a comment is fine",
-        "+max_db = -6  # hwfact-ok: policy, safety margin chosen by the owner",
-        "+# hwfact-ok: interface constant, the ALSA ABI defines this",
-        "+    SNDRV_PCM_RATE = 44100",
-        "+limit = -3 dB  # hwfact-ok:",
-        "+let name = \"Speaker Playback Volume\";",
-        "+channels: 6",
-        "+    hpf = biquad(100 Hz)",
-    ])
-    files = [
-        {"filename": "src/a.rs", "status": "modified", "patch": patch},
-        {"filename": "packaging/session/test_wiring.py", "status": "modified", "patch": "@@ -0,0 +1 @@\n+rate = 48000"},
-        {"filename": "README.md", "status": "modified", "patch": "@@ -0,0 +1 @@\n+48000 Hz"},
-        {"filename": "firs/j313/graph.json", "status": "added", "patch": "@@ -0,0 +1 @@\n+\"gain\": 1.6"},
-    ]
-    got = [(p, l, n) for p, l, n, _v, _h in lint(files, ["firs/*/graph.json"])]
-    want = [
-        ("src/a.rs", 2, "hardware quantity"),
-        ("src/a.rs", 3, "sample rate"),
-        ("src/a.rs", 4, "board or SoC list"),
-        ("src/a.rs", 9, "dB level"),
-        ("src/a.rs", 11, "hardware quantity"),
-        ("src/a.rs", 12, "frequency"),
-    ]
-    if got != want:
-        print(f"self-test FAILED\n got:  {got}\n want: {want}", file=sys.stderr)
+    failed = []
+    for path, text, rule in SELF_TEST:
+        got = lint([{"filename": path, "status": "modified", "patch": patch_of([text])}], [])
+        name = got[0][2] if got else None
+        if name != rule:
+            failed.append(f"{path}: {text!r}: got {name}, want {rule}")
+    # A reason in a comment on the line above counts; one in a string on the line above does not.
+    ok = lint([{"filename": "src/a.py", "status": "modified", "patch": patch_of([
+        "# hwfact-ok: interface constant, the ALSA ABI defines this", "SNDRV_PCM_RATE = 44100"])}], [])
+    bad = lint([{"filename": "src/a.rs", "status": "modified", "patch": patch_of([
+        "let msg = \"hwfact-ok: x y\";", "let rate = 48000;"])}], [])
+    if ok or len(bad) != 1:
+        failed.append(f"line-above reason: got {len(ok)} and {len(bad)}, want 0 and 1")
+    # Line numbers stay right across '\ No newline at end of file'.
+    nonl = lint([{"filename": "src/nonl.c", "status": "modified",
+                  "patch": "@@ -1 +1,2 @@\n-old\n\\ No newline at end of file\n+int a;\n+#define RATE 48000"}], [])
+    if [l for _p, l, *_ in nonl] != [2]:
+        failed.append(f"no-newline marker: got lines {[l for _p, l, *_ in nonl]}, want [2]")
+    # Skips: test paths, docs, allowlisted paths.
+    skipped = lint([
+        {"filename": "packaging/session/test_wiring.py", "status": "modified", "patch": patch_of(["rate = 48000"])},
+        {"filename": "README.md", "status": "modified", "patch": patch_of(["48000 Hz"])},
+        {"filename": "firs/j313/graph.json", "status": "added", "patch": patch_of(["\"gain\": 1.6"])},
+    ], ["firs/*/graph.json"])
+    if skipped:
+        failed.append(f"skips: got {skipped}")
+    # Exit status, without printing workflow commands into the self-test's own log.
+    sink = io.StringIO()
+    if report([("x", 1, "n", "v", "h")], True, sink) != 1 or report([], True, sink) != 0 \
+            or report([("x", 1, "n", "v", "h")], False, sink) != 0 or "::error file=x" not in sink.getvalue():
+        failed.append("strict exit status or annotation format")
+    if failed:
+        print("self-test FAILED:\n  " + "\n  ".join(failed), file=sys.stderr)
         return 1
-    if report([("x", 1, "n", "v", "h")], True) != 1 or report([], True) != 0:
-        print("self-test FAILED: strict exit status", file=sys.stderr)
-        return 1
-    print("hwfact-lint self-test ok")
+    print(f"hwfact-lint self-test ok ({len(SELF_TEST) + 5} checks)")
     return 0
 
 
