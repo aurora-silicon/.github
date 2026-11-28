@@ -17,8 +17,8 @@ Thanks for helping bring Linux to Apple Silicon Macs. This page applies to every
 
 A PR merges when CI is green, it was tested on the touched Macs at its head, and someone other than the author approved it with no blocking finding; then it merges the same hour. [Merge policy](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/merge-policy.md)
 
-- **Core** and **Omarchy Mac** maintainers review, approve and merge ([review and merging handbook](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/review-and-merge-handbook.md)).
-- **Aurora Dev** contributors develop on branches with CI and lab access, open PRs and review; a Core or Omarchy Mac member approves and merges.
+- **Core**, **Omarchy Mac** and **Aurora Maintainers** members review, approve and merge ([review and merging handbook](https://github.com/aurora-silicon/agent-guidelines/blob/main/policy/review-and-merge-handbook.md)).
+- **Aurora Dev** contributors develop on branches with CI and lab access, open PRs and review; a Core, Omarchy Mac or Aurora Maintainers member approves and merges.
 - **Owners** cut releases and change settings and access. Roles: [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Reporting bugs

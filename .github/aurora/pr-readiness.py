@@ -50,7 +50,7 @@ POLICY = "https://github.com/aurora-silicon/agent-guidelines/blob/main"
 # is never touched, except hw-row-ok, which it removes on a new head.
 STATE_LABELS = {
     "ready-to-merge": ("0e8a16", "Meets the merge policy: merge it (bot)"),
-    "needs-review": ("fbca04", "No approving review from Core or Omarchy Mac yet (bot)"),
+    "needs-review": ("fbca04", "No approving review from Core, Omarchy Mac or Aurora Maintainers yet (bot)"),
     "needs-hw-row": ("d4c5f9", "No hardware row at the PR head (bot)"),
     "changes-requested": ("e99695", "A reviewer requested changes (bot)"),
     "ci-failing": ("b60205", "A check failed at the PR head (bot)"),
@@ -437,9 +437,9 @@ def review_state(pr, head):
     elif agent and agent[0] == "MERGE":
         state = ("ok", f"[review verdict MERGE at `{short(head)}`]({agent[1]}); no GitHub approval yet, so approve it or merge through the bypass (`--admin`)")
     elif approvals:
-        state = ("missing", "approved by " + ", ".join(w for w, _ in approvals) + ", but GitHub does not count it yet (code owner from Core or Omarchy Mac needed, or approval went stale)")
+        state = ("missing", "approved by " + ", ".join(w for w, _ in approvals) + ", but GitHub does not count it yet (code owner from Core, Omarchy Mac or Aurora Maintainers needed, or approval went stale)")
     else:
-        state = ("missing", "needs one approving review from Core or Omarchy Mac (not the author)")
+        state = ("missing", "needs one approving review from Core, Omarchy Mac or Aurora Maintainers (not the author)")
     ch = ("ok", "none") if not changes else ("open", "requested by " + ", ".join(f"[{w}]({r['url']})" for w, r in changes))
     if agent and agent[0] in ("FINISH", "HOLD", "CLOSE") and not changes:
         ch = ("open", f"[review verdict {agent[0]} at `{short(head)}`]({agent[1]})")
