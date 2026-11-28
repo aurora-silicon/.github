@@ -34,7 +34,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "1"
+VERSION = "2"
 MARKER = "<!-- aurora-pr-readiness"
 API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
@@ -61,6 +61,8 @@ PREFIX_LABELS = {"area:": "1d76db", "blast:": "5319e7", "door:": "bfd4f2"}
 HOLD_LABELS = {"hold", "blocked"}  # set by people; the bot never touches them
 BOT_LOGINS = {x for x in os.environ.get("BOT_LOGINS", "github-actions,github-actions[bot]").split(",") if x}
 TRUSTED = {"OWNER", "MEMBER"}
+# GitHub reports the organisation's review App with association NONE.
+TRUSTED_BOTS = {x for x in os.environ.get("TRUSTED_BOTS", "aurora-silicon-review,aurora-silicon-review[bot]").split(",") if x}
 HWOK_LABEL = "hw-row-ok"
 IGNORE_CHECKS = re.compile(r"pr-readiness|readiness", re.I)
 
@@ -74,8 +76,41 @@ GENS = {  # chip -> generation label
 }
 CHIP_GEN = {c: g for g, cs in GENS.items() for c in cs.split()}
 MAC_RE = re.compile(r"(?<![\w/.-])(J\d{3}[a-z]{0,2}|T[68]\d{3}|M[1-5](?: (?:Pro|Max|Ultra|Air|mini))?|Neo|MacBook(?: \w+)?|Mac ?mini|iMac|Mac Studio)(?![\w/.-])", re.I)
-RESULT_RE = re.compile(r"\b(boots?|booted|row|ran|runs?|tested|tests?|pass(?:es|ed)?|fail(?:s|ed|ures?)?|ok|clean|soak|deqp|cts|kunit|regression|avcs?|units|works?|working|results?|no change)\b", re.I)
-NOT_ROW_RE = re.compile(r"^\W*(forward-)?(merged?|rebased?|cherry-picked)\b", re.I)
+ZERO_FAILURE_RE = re.compile(
+    r"(?:\b(?:0|zero|no)\s+fail(?:s|ed|ures?)?\b"
+    r"|\bfail(?:s|ed|ures?)?\s*[=:]?\s*0\b)",
+    re.I,
+)
+FAILED_ROW_RE = re.compile(r"\bfail(?:s|ed|ures?)?\b", re.I)
+RESULT_RE = re.compile(
+    rf"(?:{ZERO_FAILURE_RE.pattern}"
+    r"|\b(?:boots?|booted|row|ran|runs?|tested|tests?|pass(?:es|ed)?|ok|clean"
+    r"|soak|deqp|cts|kunit|regression|avcs?|units|works?|working|results?|verif(?:ied|ication)"
+    r"|smoke|resumed?|wakes?|woke|no change)\b)",
+    re.I,
+)
+NOT_ROW_RE = re.compile(
+    r"^\W*(?:(?:forward-)?(?:merged?|rebased?|cherry-picked)\b"
+    r"|(?:not\s+yet|still\s+to\s+run|todo)\s*:)",
+    re.I,
+)
+NEGATED_ROW_RE = re.compile(
+    r"(?:"
+    r"\b(?:not|never|n't|hasn't|haven't|didn't|wasn't|weren't)\s+(?:yet\s+)?(?:been\s+)?"
+    r"(?:boot(?:ed|s|ing)?|test(?:ed|s|ing)?|re-?test(?:ed|ing)?|run|ran|re-?run|verified|tried)\b"
+    r"|\b(?:untested|unbooted)\b"
+    r"|\bno\s+(?:hardware\s+)?(?:row|boot|test)\b"
+    r"|\bwould\s+(?:do|suffice|cover)\b"
+    r"|\bneeds?\s+(?:a\s+)?(?:hardware\s+)?(?:boot|row|test)\b"
+    r"|\b(?:rows?|boots?|tests?|runs?)\s+(?:(?:is|are|still)\s+)*(?:owed|pending|deferred)\b"
+    r"|\b(?:owed|pending|deferred)\s+(?:hardware\s+)?(?:rows?|boots?|tests?|runs?)\b"
+    r"|\b(?:exact[- ]head|at\s+head|at\s+this\s+head|at\s+the\s+head)\b[^.;\n]*\b(?:queued|pending|deferred|owed|missing|not\s+(?:yet\s+)?(?:booted|tested|run|verified))\b"
+    r"|\b(?:boot|row|test|smoke|refresh|run)\s+(?:of|at|on|for)\s+`?[0-9a-f]{7,40}`?\s*(?:\(\s*)?(?:is\s+)?(?:queued|pending|needed|deferred|owed|missing|would\s+do)\b"
+    r"|\b`?[0-9a-f]{7,40}`?\s*(?:\(\s*)?(?:is\s+)?(?:queued|pending|deferred|owed|untested|unbooted)\b"
+    r")",
+    re.I,
+)
+SENT_SPLIT_RE = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\bvs)(?<!\bno)[.!?]+\s+")
 HEX_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 VERDICT_RE = re.compile(r"^[^\w\n]*verdict[^\w\n]{0,8}(MERGE|FINISH|HOLD|CLOSE)\b", re.I | re.M)
 
@@ -135,7 +170,17 @@ def graphql(query, **variables):
     r = request("POST", "/graphql", {"query": query, "variables": variables})
     if r.get("errors"):
         raise SystemExit("GraphQL: " + json.dumps(r["errors"])[:500])
-    return r["data"]
+    data = r["data"]
+    if query == DETAIL_Q:
+        pr = data["repository"]["pullRequest"]
+        if pr:
+            reviews = pr["reviews"]
+            page = reviews["pageInfo"]
+            while page["hasPreviousPage"]:
+                older = graphql(REVIEWS_Q, **variables, before=page["startCursor"])["repository"]["pullRequest"]["reviews"]
+                reviews["nodes"] = older["nodes"] + reviews["nodes"]
+                page = older["pageInfo"]
+    return data
 
 
 LIST_Q = """
@@ -162,13 +207,20 @@ query($owner:String!,$name:String!,$n:Int!){
       headRefOid baseRefName author{login __typename}
       labels(first:50){nodes{name}}
       files(first:100){totalCount nodes{path}}
-      latestOpinionatedReviews(first:30){nodes{state author{login} authorAssociation submittedAt url commit{oid}}}
-      reviews(last:30){nodes{state body url author{login} authorAssociation submittedAt commit{oid}}}
+      reviews(last:30){pageInfo{hasPreviousPage startCursor}
+        nodes{state body url author{login} authorAssociation submittedAt commit{oid}}}
       comments(last:100){totalCount nodes{databaseId body url author{login} authorAssociation createdAt}}
       commits(last:1){nodes{commit{committedDate statusCheckRollup{state contexts(first:100){nodes{
         __typename
-        ... on CheckRun{name status conclusion detailsUrl}
-        ... on StatusContext{context state targetUrl}}}}}}}}}}
+        ... on CheckRun{name status conclusion detailsUrl databaseId startedAt completedAt}
+        ... on StatusContext{context state targetUrl createdAt}}}}}}}}}}
+"""
+
+REVIEWS_Q = """
+query($owner:String!,$name:String!,$n:Int!,$before:String!){
+  repository(owner:$owner,name:$name){pullRequest(number:$n){
+    reviews(last:100,before:$before){pageInfo{hasPreviousPage startCursor}
+      nodes{state body url author{login} authorAssociation submittedAt commit{oid}}}}}}
 """
 
 
@@ -327,15 +379,43 @@ def short(sha):
     return sha[:8]
 
 
+def _context_is_newer(cand, prev):
+    """Return True if check context `cand` is newer than `prev` for the same check."""
+    cid, pid = cand.get("databaseId"), prev.get("databaseId")
+    if cid is not None and pid is not None:
+        return cid > pid
+    cts = cand.get("startedAt") or cand.get("completedAt") or cand.get("createdAt") or ""
+    pts = prev.get("startedAt") or prev.get("completedAt") or prev.get("createdAt") or ""
+    if cts and pts:
+        if cts != pts:
+            return cts > pts
+        c_end = cand.get("completedAt") or ""
+        p_end = prev.get("completedAt") or ""
+        if c_end != p_end:
+            return c_end > p_end
+    return True
+
+
+def _latest_contexts(ctx):
+    """Collapse repeated runs of the same check at the head SHA to the newest run."""
+    latest = {}
+    for c in ctx:
+        name = c["name"] if c["__typename"] == "CheckRun" else c["context"]
+        if IGNORE_CHECKS.search(name):
+            continue
+        key = (c["__typename"], name)
+        if key not in latest or _context_is_newer(c, latest[key]):
+            latest[key] = c
+    return list(latest.values())
+
+
 def ci_state(pr):
     nodes = (((pr["commits"]["nodes"] or [{}])[0].get("commit") or {}).get("statusCheckRollup") or {})
-    ctx = (nodes.get("contexts") or {}).get("nodes") or []
+    ctx = _latest_contexts((nodes.get("contexts") or {}).get("nodes") or [])
     failing, pending, passed = [], [], 0
     for c in ctx:
         if c["__typename"] == "CheckRun":
             name = c["name"]
-            if IGNORE_CHECKS.search(name):
-                continue
             if c["status"] != "COMPLETED":
                 pending.append(name)
             elif c["conclusion"] in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"):
@@ -344,8 +424,6 @@ def ci_state(pr):
                 passed += 1
         else:
             name = c["context"]
-            if IGNORE_CHECKS.search(name):
-                continue
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
             elif c["state"] in ("FAILURE", "ERROR"):
@@ -371,16 +449,56 @@ def head_prefix_in(text, head):
     return False
 
 
+def body_row_lines(body):
+    """Lines of a PR body outside the visible 'Not yet:' field."""
+    cur, fold = None, 0
+    for raw in strip_comments(body).splitlines():
+        low_raw = raw.lower()
+        if "<details" in low_raw:
+            fold += 1
+            cur = None
+        if "</details>" in low_raw:
+            fold = max(0, fold - 1)
+            continue
+        if fold:
+            yield raw
+            continue
+        l = raw.lstrip()
+        head_line = l.startswith("#")
+        l = re.sub(r"^#+\s*", "", l)
+        l = re.sub(r"^[-*+]\s+", "", l)
+        l = re.sub(r"[*_]", "", l)
+        m = FIELD_RE.match(l.lower())
+        if m or (head_line and HEAD_RE.match(l.lower().strip())):
+            cur = (m or HEAD_RE.match(l.lower().strip())).group(1)
+        elif head_line:
+            cur = None
+        if cur == "not yet":
+            continue
+        yield raw
+
+
 def is_row(line, head):
-    """A hardware row: head SHA, a Mac and a result on one line."""
-    return (head_prefix_in(line, head) and MAC_RE.search(line) and RESULT_RE.search(line)
-            and not NOT_ROW_RE.search(line))
+    """Require the head SHA, Mac and positive result in one sentence on one line."""
+    for raw in line.splitlines():
+        if NOT_ROW_RE.search(raw):
+            continue
+        for sent in SENT_SPLIT_RE.split(raw):
+            if (NOT_ROW_RE.search(sent) or not head_prefix_in(sent, head)
+                    or not MAC_RE.search(sent) or not RESULT_RE.search(sent)
+                    or NEGATED_ROW_RE.search(sent)):
+                continue
+            # Zero-failure counts are positive evidence, but any remaining
+            # explicit failure disqualifies this head-bearing sentence.
+            if not FAILED_ROW_RE.search(ZERO_FAILURE_RE.sub("", sent)):
+                return True
+    return False
 
 
 def find_row(pr, sec, head):
     if re.search(r"no runtime (change|effect)", sec.get("tested", ""), re.I):
         return "ok", "not needed: no runtime change"
-    for line in strip_comments(pr["body"] or "").splitlines():
+    for line in body_row_lines(pr["body"] or ""):
         if is_row(line, head):
             return "ok", f"in the PR body at `{short(head)}`"
     for c in reversed(pr["comments"]["nodes"]):
@@ -395,17 +513,22 @@ def find_row(pr, sec, head):
 
 def review_state(pr, head):
     author = (pr["author"] or {}).get("login", "")
+    # App reviews can be absent from latestOpinionatedReviews. Derive each
+    # reviewer's latest opinion from reviews; comments do not replace an
+    # opinion, but a dismissal invalidates an earlier approval or request.
+    latest = {}
+    for r in sorted(pr["reviews"]["nodes"], key=lambda r: r.get("submittedAt") or ""):
+        who = (r["author"] or {}).get("login")
+        if who and who != author and r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[who] = r
     approvals, changes = [], []
-    for r in pr["latestOpinionatedReviews"]["nodes"]:
-        who = (r["author"] or {}).get("login", "ghost")
-        if who == author:
-            continue
-        if r["state"] == "APPROVED":
+    for who, r in latest.items():
+        if r["state"] == "APPROVED" and (r.get("commit") or {}).get("oid") == head:
             approvals.append((who, r))
         elif r["state"] == "CHANGES_REQUESTED":
             changes.append((who, r))
     decision = pr.get("reviewDecision")
-    trusted = [w for w, r in approvals if r["authorAssociation"] in ("OWNER", "MEMBER")]
+    trusted = [w for w, r in approvals if r["authorAssociation"] in TRUSTED or w in TRUSTED_BOTS]
     # Agents that share the author's account post their verdict as a review
     # or comment (policy/pr-review.md). Only members' verdicts count, only a
     # line with one verdict (not the template's list), latest one wins.
@@ -431,7 +554,7 @@ def review_state(pr, head):
                 continue
             if oid == head or head_prefix_in(line, head):
                 agent = (m.group(1).upper(), url)
-    if decision == "APPROVED" or (decision is None and trusted):
+    if approvals and (decision == "APPROVED" or (decision is None and trusted)):
         names = ", ".join(sorted({w for w, _ in approvals})) or "approved"
         state = ("ok", f"approved by {names}")
     elif agent and agent[0] == "MERGE":
