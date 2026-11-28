@@ -3,6 +3,7 @@
 import importlib.util
 import pathlib
 import sys
+from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("pr_readiness", HERE / "pr-readiness.py")
@@ -247,10 +248,147 @@ def test_hw_row_detection():
         assert state == "ok", f"{label}: expected ok, got {(state, msg)}"
 
 
+HEAD = "deadbeef" + "1" * 32
+
+
+def review(state="APPROVED", who="aurora-silicon-review[bot]", head=HEAD, when="2026-11-28T00:00:00Z", assoc="NONE"):
+    return {
+        "state": state, "author": {"login": who}, "authorAssociation": assoc,
+        "commit": {"oid": head}, "submittedAt": when, "body": "",
+        "url": "https://example.invalid/review",
+    }
+
+
+def review_pr(reviews):
+    return {
+        "author": {"login": "author"}, "reviews": {"nodes": reviews},
+        "comments": {"nodes": []}, "reviewDecision": None,
+        "latestOpinionatedReviews": {"nodes": []},
+    }
+
+
+def test_app_approval_from_reviews():
+    pr = review_pr([review()])
+    state, changes = PRR.review_state(pr, HEAD)
+    assert state[0] == "ok" and changes[0] == "ok", (state, changes)
+    # The evaluator no longer needs the connection that omits App reviews.
+    del pr["latestOpinionatedReviews"]
+    assert PRR.review_state(pr, HEAD)[0][0] == "ok"
+    assert "latestOpinionatedReviews" not in PRR.DETAIL_Q
+    # An App approval remains evidence, not a bypass for GitHub's ruleset.
+    pr["reviewDecision"] = "REVIEW_REQUIRED"
+    assert PRR.review_state(pr, HEAD)[0][0] == "missing"
+
+
+def test_review_controls():
+    for label, node in [
+        ("stale approval", review(head="2" * 40)),
+        ("self approval", review(who="author", assoc="OWNER")),
+        ("untrusted App", review(who="other-app[bot]")),
+        ("deleted reviewer", dict(review(), author=None)),
+    ]:
+        pr = review_pr([node])
+        assert PRR.review_state(pr, HEAD)[0][0] == "missing", label
+        if label != "untrusted App":
+            pr["reviewDecision"] = "APPROVED"
+            assert PRR.review_state(pr, HEAD)[0][0] == "missing", label
+    pr = review_pr([review(who="collaborator", assoc="COLLABORATOR")])
+    pr["reviewDecision"] = "APPROVED"
+    assert PRR.review_state(pr, HEAD)[0][0] == "ok"
+    for who, assoc in [("maintainer", "MEMBER"), ("owner", "OWNER"), ("aurora-silicon-review", "NONE")]:
+        assert PRR.review_state(review_pr([review(who=who, assoc=assoc)]), HEAD)[0][0] == "ok", who
+    # Newer non-opinionated reviews must not clear approval or a blocker.
+    later = "2026-11-28T01:00:00Z"
+    for state in ("COMMENTED", "PENDING"):
+        pr = review_pr([review(state=state, when=later), review()])
+        assert PRR.review_state(pr, HEAD)[0][0] == "ok", state
+        pr["reviews"]["nodes"][1] = review(state="CHANGES_REQUESTED")
+        assert PRR.review_state(pr, HEAD)[1][0] == "open", state
+    for state in ("CHANGES_REQUESTED", "DISMISSED"):
+        pr = review_pr([review(state=state, when=later), review()])
+        approval, changes = PRR.review_state(pr, HEAD)
+        assert approval[0] == "missing", (state, approval)
+        assert changes[0] == ("open" if state == "CHANGES_REQUESTED" else "ok"), changes
+        # The same reviewer's newer approval clears their old change request.
+        pr["reviews"]["nodes"] = [review(when=later), review(state=state)]
+        assert PRR.review_state(pr, HEAD)[1][0] == "ok", state
+    # One reviewer's approval cannot clear another reviewer's blocker.
+    pr = review_pr([review(), review(state="CHANGES_REQUESTED", who="maintainer", assoc="MEMBER")])
+    assert PRR.review_state(pr, HEAD)[1][0] == "open"
+
+
+def test_review_pagination():
+    def page(nodes, cursor=None):
+        return {"data": {"repository": {"pullRequest": {"reviews": {
+            "nodes": nodes,
+            "pageInfo": {"hasPreviousPage": cursor is not None, "startCursor": cursor},
+        }}}}}
+
+    replies = [
+        page([review(state="COMMENTED", when="2026-11-28T02:00:00Z")], "middle"),
+        page([review(state="COMMENTED", when="2026-11-28T01:00:00Z")], "oldest"),
+        page([review()]),
+    ]
+    with patch.object(PRR, "request", side_effect=replies) as request:
+        pr = PRR.graphql(PRR.DETAIL_Q, owner="example", name="repo", n=1)["repository"]["pullRequest"]
+    assert len(pr["reviews"]["nodes"]) == 3
+    assert [call.args[2]["variables"].get("before") for call in request.call_args_list] == [None, "middle", "oldest"]
+    assert PRR.review_state(dict(review_pr([]), reviews=pr["reviews"]), HEAD)[0][0] == "ok"
+    # A failed history read must stop evaluation rather than use partial data.
+    with patch.object(PRR, "request", side_effect=[replies[0], SystemExit("review page unavailable")]):
+        try:
+            PRR.graphql(PRR.DETAIL_Q, owner="example", name="repo", n=1)
+        except SystemExit as exc:
+            assert str(exc) == "review page unavailable"
+        else:
+            raise AssertionError("partial review history was accepted")
+
+
+def test_deferred_row_wording():
+    for text in (
+        "J616s at deadbeef: hardware row owed",
+        "J616s at deadbeef: boot test owed",
+        "J616s at deadbeef: row is still owed",
+        "J616s at deadbeef: owed hardware row",
+        "J616s at deadbeef: tests not run",
+        "J616s at deadbeef: not yet run",
+    ):
+        assert not PRR.is_row(text, HEAD), text
+    assert PRR.is_row("J616s at deadbeef: booted, 0 failed units", HEAD)
+
+
+def test_counted_wrong_fixtures():
+    # End-to-end evaluation: all three pieces of head evidence yield readiness.
+    pr = dict(review_pr([review()]), **make_pr_ci([
+        check_run("apple-build", "COMPLETED", "CANCELLED", db_id=100),
+        check_run("apple-build", "COMPLETED", "SUCCESS", db_id=200),
+    ]))
+    pr.update({
+        "headRefOid": HEAD, "number": 1, "baseRefName": "main",
+        "createdAt": "2026-11-28T00:00:00Z", "mergeable": "MERGEABLE",
+        "body": "**Tested:** J616s at deadbeef: booted, 0 failed units\n**Risk:** two-way · M4 Pro",
+        "labels": {"nodes": []}, "files": {"nodes": []},
+    })
+    labels = PRR.evaluate(pr, [], "")[0]
+    assert "ready-to-merge" in labels and "ci-failing" not in labels, labels
+    print("PASS fixture #9: old cancellation + newer pass -> CI ok")
+    print("PASS fixture App approval: empty latestOpinionatedReviews + exact-head APPROVED -> review ok")
+    print("PASS fixture positive row: head SHA + J616s + completed result -> row ok")
+    pr["body"] = pr["body"].replace("booted, 0 failed units", "hardware row owed; tests not run")
+    labels = PRR.evaluate(pr, [], "")[0]
+    assert "needs-hw-row" in labels and "ready-to-merge" not in labels, labels
+    print("PASS fixture #11: head SHA + J616s + owed/not run -> needs-hw-row")
+
+
 def main():
     tests = [
         test_ci_state_latest_run,
         test_hw_row_detection,
+        test_deferred_row_wording,
+        test_app_approval_from_reviews,
+        test_review_controls,
+        test_review_pagination,
+        test_counted_wrong_fixtures,
     ]
     for fn in tests:
         fn()

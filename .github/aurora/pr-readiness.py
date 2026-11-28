@@ -34,7 +34,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "1"
+VERSION = "2"
 MARKER = "<!-- aurora-pr-readiness"
 API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
@@ -61,6 +61,8 @@ PREFIX_LABELS = {"area:": "1d76db", "blast:": "5319e7", "door:": "bfd4f2"}
 HOLD_LABELS = {"hold", "blocked"}  # set by people; the bot never touches them
 BOT_LOGINS = {x for x in os.environ.get("BOT_LOGINS", "github-actions,github-actions[bot]").split(",") if x}
 TRUSTED = {"OWNER", "MEMBER"}
+# GitHub reports the organisation's review App with association NONE.
+TRUSTED_BOTS = {x for x in os.environ.get("TRUSTED_BOTS", "aurora-silicon-review,aurora-silicon-review[bot]").split(",") if x}
 HWOK_LABEL = "hw-row-ok"
 IGNORE_CHECKS = re.compile(r"pr-readiness|readiness", re.I)
 
@@ -94,6 +96,8 @@ NEGATED_ROW_RE = re.compile(
     r"|\bno\s+(?:hardware\s+)?(?:row|boot|test)\b"
     r"|\bwould\s+(?:do|suffice|cover)\b"
     r"|\bneeds?\s+(?:a\s+)?(?:hardware\s+)?(?:boot|row|test)\b"
+    r"|\b(?:rows?|boots?|tests?|runs?)\s+(?:(?:is|are|still)\s+)*(?:owed|pending|deferred)\b"
+    r"|\b(?:owed|pending|deferred)\s+(?:hardware\s+)?(?:rows?|boots?|tests?|runs?)\b"
     r"|\b(?:exact[- ]head|at\s+head|at\s+this\s+head|at\s+the\s+head)\b[^.;\n]*\b(?:queued|pending|deferred|owed|missing|not\s+(?:yet\s+)?(?:booted|tested|run|verified))\b"
     r"|\b(?:boot|row|test|smoke|refresh|run)\s+(?:of|at|on|for)\s+`?[0-9a-f]{7,40}`?\s*(?:\(\s*)?(?:is\s+)?(?:queued|pending|needed|deferred|owed|missing|would\s+do)\b"
     r"|\b`?[0-9a-f]{7,40}`?\s*(?:\(\s*)?(?:is\s+)?(?:queued|pending|deferred|owed|untested|unbooted)\b"
@@ -160,7 +164,17 @@ def graphql(query, **variables):
     r = request("POST", "/graphql", {"query": query, "variables": variables})
     if r.get("errors"):
         raise SystemExit("GraphQL: " + json.dumps(r["errors"])[:500])
-    return r["data"]
+    data = r["data"]
+    if query == DETAIL_Q:
+        pr = data["repository"]["pullRequest"]
+        if pr:
+            reviews = pr["reviews"]
+            page = reviews["pageInfo"]
+            while page["hasPreviousPage"]:
+                older = graphql(REVIEWS_Q, **variables, before=page["startCursor"])["repository"]["pullRequest"]["reviews"]
+                reviews["nodes"] = older["nodes"] + reviews["nodes"]
+                page = older["pageInfo"]
+    return data
 
 
 LIST_Q = """
@@ -187,13 +201,20 @@ query($owner:String!,$name:String!,$n:Int!){
       headRefOid baseRefName author{login __typename}
       labels(first:50){nodes{name}}
       files(first:100){totalCount nodes{path}}
-      latestOpinionatedReviews(first:30){nodes{state author{login} authorAssociation submittedAt url commit{oid}}}
-      reviews(last:30){nodes{state body url author{login} authorAssociation submittedAt commit{oid}}}
+      reviews(last:30){pageInfo{hasPreviousPage startCursor}
+        nodes{state body url author{login} authorAssociation submittedAt commit{oid}}}
       comments(last:100){totalCount nodes{databaseId body url author{login} authorAssociation createdAt}}
       commits(last:1){nodes{commit{committedDate statusCheckRollup{state contexts(first:100){nodes{
         __typename
         ... on CheckRun{name status conclusion detailsUrl databaseId startedAt completedAt}
         ... on StatusContext{context state targetUrl createdAt}}}}}}}}}}
+"""
+
+REVIEWS_Q = """
+query($owner:String!,$name:String!,$n:Int!,$before:String!){
+  repository(owner:$owner,name:$name){pullRequest(number:$n){
+    reviews(last:100,before:$before){pageInfo{hasPreviousPage startCursor}
+      nodes{state body url author{login} authorAssociation submittedAt commit{oid}}}}}}
 """
 
 
@@ -478,17 +499,22 @@ def find_row(pr, sec, head):
 
 def review_state(pr, head):
     author = (pr["author"] or {}).get("login", "")
+    # App reviews can be absent from latestOpinionatedReviews. Derive each
+    # reviewer's latest opinion from reviews; comments do not replace an
+    # opinion, but a dismissal invalidates an earlier approval or request.
+    latest = {}
+    for r in sorted(pr["reviews"]["nodes"], key=lambda r: r.get("submittedAt") or ""):
+        who = (r["author"] or {}).get("login")
+        if who and who != author and r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[who] = r
     approvals, changes = [], []
-    for r in pr["latestOpinionatedReviews"]["nodes"]:
-        who = (r["author"] or {}).get("login", "ghost")
-        if who == author:
-            continue
-        if r["state"] == "APPROVED":
+    for who, r in latest.items():
+        if r["state"] == "APPROVED" and (r.get("commit") or {}).get("oid") == head:
             approvals.append((who, r))
         elif r["state"] == "CHANGES_REQUESTED":
             changes.append((who, r))
     decision = pr.get("reviewDecision")
-    trusted = [w for w, r in approvals if r["authorAssociation"] in ("OWNER", "MEMBER")]
+    trusted = [w for w, r in approvals if r["authorAssociation"] in TRUSTED or w in TRUSTED_BOTS]
     # Agents that share the author's account post their verdict as a review
     # or comment (policy/pr-review.md). Only members' verdicts count, only a
     # line with one verdict (not the template's list), latest one wins.
@@ -514,7 +540,7 @@ def review_state(pr, head):
                 continue
             if oid == head or head_prefix_in(line, head):
                 agent = (m.group(1).upper(), url)
-    if decision == "APPROVED" or (decision is None and trusted):
+    if approvals and (decision == "APPROVED" or (decision is None and trusted)):
         names = ", ".join(sorted({w for w, _ in approvals})) or "approved"
         state = ("ok", f"approved by {names}")
     elif agent and agent[0] == "MERGE":

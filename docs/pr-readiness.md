@@ -25,6 +25,12 @@ how maintainers use it is the [maintainer handbook](https://github.com/aurora-si
 `hold` and `blocked` are set by people (blocked on purpose) and keep a PR out of `ready-to-merge`; the bot never sets or removes them or any other label. It removes `hw-row-ok` (a maintainer's
 "I checked the row" override) when new commits arrive.
 
+Approvals and change requests come from the paginated reviews list, using each
+reviewer's latest opinion. Comments do not replace an opinion; dismissals clear
+it. Approvals must name the exact head commit. When GitHub has no review decision,
+an approval from an organisation member or the `aurora-silicon-review` App counts;
+the App's approval does not override a required review reported by GitHub.
+
 ## When it runs
 
 - On a push, a title/body/base edit, a `hold`/`blocked`/`hw-row-ok` label change, a review or a
