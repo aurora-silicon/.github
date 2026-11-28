@@ -61,6 +61,9 @@ PREFIX_LABELS = {"area:": "1d76db", "blast:": "5319e7", "door:": "bfd4f2"}
 HOLD_LABELS = {"hold", "blocked"}  # set by people; the bot never touches them
 BOT_LOGINS = {x for x in os.environ.get("BOT_LOGINS", "github-actions,github-actions[bot]").split(",") if x}
 TRUSTED = {"OWNER", "MEMBER"}
+# The organisation's review App posts agent verdicts (policy/pr-review.md);
+# GitHub reports its association as NONE, so trust it by login.
+TRUSTED_BOTS = {x for x in os.environ.get("TRUSTED_BOTS", "aurora-silicon-review,aurora-silicon-review[bot]").split(",") if x}
 HWOK_LABEL = "hw-row-ok"
 IGNORE_CHECKS = re.compile(r"pr-readiness|readiness", re.I)
 
@@ -405,7 +408,7 @@ def review_state(pr, head):
         elif r["state"] == "CHANGES_REQUESTED":
             changes.append((who, r))
     decision = pr.get("reviewDecision")
-    trusted = [w for w, r in approvals if r["authorAssociation"] in ("OWNER", "MEMBER")]
+    trusted = [w for w, r in approvals if r["authorAssociation"] in ("OWNER", "MEMBER") or w in TRUSTED_BOTS]
     # Agents that share the author's account post their verdict as a review
     # or comment (policy/pr-review.md). Only members' verdicts count, only a
     # line with one verdict (not the template's list), latest one wins.
@@ -413,13 +416,13 @@ def review_state(pr, head):
     # so its MERGE verdicts are ignored; its FINISH, HOLD and CLOSE verdicts
     # (an agent sharing the account reporting blockers) still count.
     cands = [(r.get("submittedAt") or "", r.get("authorAssociation"), r["body"] or "", r["url"], (r.get("commit") or {}).get("oid", ""),
-              (r.get("author") or {}).get("login") == author) for r in pr["reviews"]["nodes"]]
+              (r.get("author") or {}).get("login") == author, (r.get("author") or {}).get("login")) for r in pr["reviews"]["nodes"]]
     cands += [(c.get("createdAt") or "", c.get("authorAssociation"), c["body"] or "", c["url"], "",
-               (c.get("author") or {}).get("login") == author)
+               (c.get("author") or {}).get("login") == author, (c.get("author") or {}).get("login"))
               for c in pr["comments"]["nodes"] if MARKER not in (c["body"] or "")]
     agent = None
-    for when, assoc, body, url, oid, own in sorted(cands, key=lambda c: c[0]):
-        if assoc not in TRUSTED:
+    for when, assoc, body, url, oid, own, login in sorted(cands, key=lambda c: c[0]):
+        if assoc not in TRUSTED and login not in TRUSTED_BOTS:
             continue
         text = strip_comments(body)
         for m in VERDICT_RE.finditer(text):
