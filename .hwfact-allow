@@ -1,0 +1,2 @@
+# path glob                    reason
+.github/aurora/hwfact-lint.py  the linter's own rule patterns and self-test cases are sample literals

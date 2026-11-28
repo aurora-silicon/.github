@@ -1,0 +1,75 @@
+name: hwfact-lint
+
+# Reusable check for the audio repositories (and any repo that opts in):
+# flags hardware facts written as literals in the lines a PR adds. Rule:
+# agent-guidelines pre-pr-checklist.md "No hardware fact as a literal".
+# The logic is .github/aurora/hwfact-lint.py in this repository (one copy for
+# the whole org, self-tested by hwfact-lint-selftest.yml).
+# Warn-first: findings are annotations and the check passes unless the caller
+# sets strict: true. Reads the PR's patches through the API and the base
+# branch's .hwfact-allow; never checks out or runs PR code.
+# Callers: copy workflow-templates/hwfact-lint.yml into the repository.
+
+on:
+  workflow_call:
+    inputs:
+      strict:
+        description: Fail the check on findings instead of warning
+        type: boolean
+        default: false
+      tool-ref:
+        description: Ref of aurora-silicon/.github that holds hwfact-lint.py
+        type: string
+        default: main
+
+permissions: {}
+
+jobs:
+  hwfact-lint:
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Canonical hwfact-lint script
+        uses: actions/checkout@v7
+        with:
+          repository: aurora-silicon/.github
+          ref: ${{ inputs.tool-ref }}
+          path: .canon-policy
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github/aurora
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: The check can find something
+        # A linter that passes everything looks the same as a clean PR.
+        env:
+          TOOL_REF: ${{ inputs.tool-ref }}
+        run: |
+          script=.canon-policy/.github/aurora/hwfact-lint.py
+          if [ ! -f "$script" ]; then
+            echo "::error title=hwfact-lint broken::$script is missing from aurora-silicon/.github@$TOOL_REF. Fix the canonical copy there; this check does not skip."
+            exit 1
+          fi
+          python3 -I "$script" --self-test
+
+      - name: Collect the PR's files and the base allowlist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --slurp > "$RUNNER_TEMP/files.json"
+          # The base branch's list: a PR cannot exempt itself without a reviewed change landing first.
+          gh api "repos/$GITHUB_REPOSITORY/contents/.hwfact-allow?ref=$BASE" -H 'Accept: application/vnd.github.raw' \
+            > "$RUNNER_TEMP/hwfact-allow" 2>/dev/null || : > "$RUNNER_TEMP/hwfact-allow"
+
+      - name: Check the added lines
+        env:
+          STRICT: ${{ inputs.strict && '--strict' || '' }}
+        run: python3 -I .canon-policy/.github/aurora/hwfact-lint.py --files "$RUNNER_TEMP/files.json" --allow "$RUNNER_TEMP/hwfact-allow" $STRICT
