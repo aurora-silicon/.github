@@ -137,9 +137,120 @@ def test_ci_state_latest_run():
     assert state == "failing" and "dt-checks" in msg, (state, msg)
 
 
+def test_hw_row_detection():
+    # Issue #11: deferred / negated notes at the head SHA must NOT count as rows
+    negatives = [
+        (
+            "aura#429 body",
+            "746c4cd98c071111111111111111111111111111",
+            "**Tested:** J715 M4 Air at aura main `58e712b9` + this change: MTP cold-started by Linux, keyboard and trackpad work, no DART faults. Not booted at `746c4cd9` itself.",
+            [],
+        ),
+        (
+            "aura#429 comment",
+            "746c4cd98c071111111111111111111111111111",
+            "**Tested:** see comments",
+            ["The request for a J713 or desktop T8132 row is unchanged. A boot of `746c4cd98c07` would do."],
+        ),
+        (
+            "linux#2672 body",
+            "ad87173b11111111111111111111111111111111",
+            "**Tested:** J715 M4 Air, 10 cores, OS firmware 26.6.2, with this entry: firmware identity accepted, READY, Hyprland session. Not booted from `ad87173b` itself.",
+            [],
+        ),
+        (
+            "linux#2745 dt-checks comment",
+            "03884056556a1111111111111111111111111111",
+            "**Tested:** see comments",
+            ["About the `dt-checks` failure at `03884056556a` (2 new `CHECK_DTBS` warnings, 1 removed): both come from the schema, not from the change. The J604 has had the same warnings since it gained this property."],
+        ),
+        (
+            "aura#539 compiles-only note",
+            "3823d5e111111111111111111111111111111111",
+            "**Tested:** J414s (M2 Pro) at `7443df8f`: 25 of 25 RTC-alarm sleeps woke. At this PR's head `3823d5e1` (rebased onto `8521ad7c`) the file compiles; it was not booted on a Mac.",
+            [],
+        ),
+        (
+            "linux#3503 queued refresh",
+            "238f795dfba71111111111111111111111111111",
+            "- **J773g (Mac mini M4, `T8132`, exact-head refresh on `238f795dfba7` queued)**",
+            [],
+        ),
+        (
+            "Not yet section excluded",
+            "ed8a5a3734131111111111111111111111111111",
+            "**Tested:** host tests only.\n**Risk:** two-way · M4\n**Not yet:**\n- J773g boot test at `ed8a5a373413`",
+            [],
+        ),
+        (
+            "single-sentence not tested",
+            "deadbeef11111111111111111111111111111111",
+            "**Tested:** J615 not tested at `deadbeef` yet.",
+            [],
+        ),
+    ]
+    for label, head, body, comments in negatives:
+        pr = {
+            "body": body,
+            "comments": {"nodes": [{"body": c, "url": "https://example.invalid/c"} for c in comments]},
+        }
+        sec = PRR.fields(body)
+        state, msg = PRR.find_row(pr, sec, head)
+        assert state == "missing", f"{label}: expected missing, got {(state, msg)}"
+
+    # Positive controls: real completed rows must still match
+    positives = [
+        (
+            "standard Tested line",
+            "04da8bbd11111111111111111111111111111111",
+            "**Tested:** J616s T6040 at `04da8bbd` pass (0 failed units, 0 AVC).",
+            [],
+        ),
+        (
+            "multi-sentence single-line row (linux#3501 style)",
+            "d237582111111111111111111111111111111111",
+            "**Tested:** see comment",
+            ["J616s (M4 Pro, DCP firmware 26.6.2) regression row, PASS. Lock-in PQ check, saved fleet89 vs 7.3.0-fw27rev (main 00fbe806 + d2375821): 0 DCP crashes."],
+        ),
+        (
+            "skipped subtests count inside passing row",
+            "5467f0f911111111111111111111111111111111",
+            "**Tested:** J616s M4 Pro at `5467f0f9`: suspend-to-RAM 5/5 pass, 146/147 KUnit pass, 1 skipped, 0 failed units.",
+            [],
+        ),
+        (
+            "row in details Evidence block with separate Not yet",
+            "9152b9ad11111111111111111111111111111111",
+            "**Tested:** see Evidence\n**Not yet:** J713 boot at `9152b9ad`\n<details><summary>Evidence</summary>\n- J714s (T6050) row at head `9152b9ad`: pass.\n</details>",
+            [],
+        ),
+        (
+            "no runtime change exemption",
+            "abcdef0111111111111111111111111111111111",
+            "**Tested:** no runtime change (docs only).",
+            [],
+        ),
+        (
+            "exact-head verification heading",
+            "bbfd2814c74a1111111111111111111111111111",
+            "**Tested:** see comment",
+            ["### Exact-head `bbfd2814c74a` verification (Apple M5 Max `J775c` / `G17C B1`):"],
+        ),
+    ]
+    for label, head, body, comments in positives:
+        pr = {
+            "body": body,
+            "comments": {"nodes": [{"body": c, "url": "https://example.invalid/c"} for c in comments]},
+        }
+        sec = PRR.fields(body)
+        state, msg = PRR.find_row(pr, sec, head)
+        assert state == "ok", f"{label}: expected ok, got {(state, msg)}"
+
+
 def main():
     tests = [
         test_ci_state_latest_run,
+        test_hw_row_detection,
     ]
     for fn in tests:
         fn()

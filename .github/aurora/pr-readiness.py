@@ -74,8 +74,33 @@ GENS = {  # chip -> generation label
 }
 CHIP_GEN = {c: g for g, cs in GENS.items() for c in cs.split()}
 MAC_RE = re.compile(r"(?<![\w/.-])(J\d{3}[a-z]{0,2}|T[68]\d{3}|M[1-5](?: (?:Pro|Max|Ultra|Air|mini))?|Neo|MacBook(?: \w+)?|Mac ?mini|iMac|Mac Studio)(?![\w/.-])", re.I)
-RESULT_RE = re.compile(r"\b(boots?|booted|row|ran|runs?|tested|tests?|pass(?:es|ed)?|fail(?:s|ed|ures?)?|ok|clean|soak|deqp|cts|kunit|regression|avcs?|units|works?|working|results?|no change)\b", re.I)
-NOT_ROW_RE = re.compile(r"^\W*(forward-)?(merged?|rebased?|cherry-picked)\b", re.I)
+RESULT_RE = re.compile(
+    r"(?:\b(?:0|zero|no)\s+fail(?:s|ed|ures?)?\b"
+    r"|\bfail(?:s|ed|ures?)?\s*[=:]?\s*0\b"
+    r"|\b(?:boots?|booted|row|ran|runs?|tested|tests?|pass(?:es|ed)?|ok|clean"
+    r"|soak|deqp|cts|kunit|regression|avcs?|units|works?|working|results?|verif(?:ied|ication)"
+    r"|smoke|resumed?|wakes?|woke|no change)\b)",
+    re.I,
+)
+NOT_ROW_RE = re.compile(
+    r"^\W*(?:(?:forward-)?(?:merged?|rebased?|cherry-picked)|not\s+yet\s*:|still\s+to\s+run\s*:|todo\s*:)\b",
+    re.I,
+)
+NEGATED_ROW_RE = re.compile(
+    r"(?:"
+    r"\b(?:not|never|n't|hasn't|haven't|didn't|wasn't|weren't)\s+(?:yet\s+)?(?:been\s+)?"
+    r"(?:boot(?:ed|s|ing)?|test(?:ed|s|ing)?|re-?test(?:ed|ing)?|run|ran|re-?run|verified|tried)\b"
+    r"|\b(?:untested|unbooted)\b"
+    r"|\bno\s+(?:hardware\s+)?(?:row|boot|test)\b"
+    r"|\bwould\s+(?:do|suffice|cover)\b"
+    r"|\bneeds?\s+(?:a\s+)?(?:hardware\s+)?(?:boot|row|test)\b"
+    r"|\b(?:exact[- ]head|at\s+head|at\s+this\s+head|at\s+the\s+head)\b[^.;\n]*\b(?:queued|pending|deferred|owed|missing|not\s+(?:yet\s+)?(?:booted|tested|run|verified))\b"
+    r"|\b(?:boot|row|test|smoke|refresh|run)\s+(?:of|at|on|for)\s+`?[0-9a-f]{7,40}`?\s*(?:\(\s*)?(?:is\s+)?(?:queued|pending|needed|deferred|owed|missing|would\s+do)\b"
+    r"|\b`?[0-9a-f]{7,40}`?\s*(?:\(\s*)?(?:is\s+)?(?:queued|pending|deferred|owed|untested|unbooted)\b"
+    r")",
+    re.I,
+)
+SENT_SPLIT_RE = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\bvs)(?<!\bno)[.!?]+\s+")
 HEX_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 VERDICT_RE = re.compile(r"^[^\w\n]*verdict[^\w\n]{0,8}(MERGE|FINISH|HOLD|CLOSE)\b", re.I | re.M)
 
@@ -397,16 +422,48 @@ def head_prefix_in(text, head):
     return False
 
 
+def body_row_lines(body):
+    """Lines of a PR body outside the visible 'Not yet:' field."""
+    cur, fold = None, 0
+    for raw in strip_comments(body).splitlines():
+        low_raw = raw.lower()
+        if "<details" in low_raw:
+            fold += 1
+            cur = None
+        if "</details>" in low_raw:
+            fold = max(0, fold - 1)
+            continue
+        if fold:
+            yield raw
+            continue
+        l = raw.lstrip()
+        head_line = l.startswith("#")
+        l = re.sub(r"^#+\s*", "", l)
+        l = re.sub(r"^[-*+]\s+", "", l)
+        l = re.sub(r"[*_]", "", l)
+        m = FIELD_RE.match(l.lower())
+        if m or (head_line and HEAD_RE.match(l.lower().strip())):
+            cur = (m or HEAD_RE.match(l.lower().strip())).group(1)
+        elif head_line:
+            cur = None
+        if cur == "not yet":
+            continue
+        yield raw
+
+
 def is_row(line, head):
-    """A hardware row: head SHA, a Mac and a result on one line."""
-    return (head_prefix_in(line, head) and MAC_RE.search(line) and RESULT_RE.search(line)
-            and not NOT_ROW_RE.search(line))
+    """A hardware row: head SHA, a Mac and a positive result, not negated at the head."""
+    if (NOT_ROW_RE.search(line) or not head_prefix_in(line, head)
+            or not MAC_RE.search(line) or not RESULT_RE.search(line)):
+        return False
+    head_sents = [s for s in SENT_SPLIT_RE.split(line) if head_prefix_in(s, head)]
+    return any(not NEGATED_ROW_RE.search(s) for s in head_sents)
 
 
 def find_row(pr, sec, head):
     if re.search(r"no runtime (change|effect)", sec.get("tested", ""), re.I):
         return "ok", "not needed: no runtime change"
-    for line in strip_comments(pr["body"] or "").splitlines():
+    for line in body_row_lines(pr["body"] or ""):
         if is_row(line, head):
             return "ok", f"in the PR body at `{short(head)}`"
     for c in reversed(pr["comments"]["nodes"]):
