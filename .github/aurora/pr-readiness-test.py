@@ -189,6 +189,12 @@ def test_hw_row_detection():
             "**Tested:** J615 not tested at `deadbeef` yet.",
             [],
         ),
+        (
+            "Mac and pass separated from head SHA",
+            "d237582111111111111111111111111111111111",
+            "**Tested:** see comment",
+            ["J616s (M4 Pro, DCP firmware 26.6.2) regression row, PASS. Lock-in PQ check, saved fleet89 vs 7.3.0-fw27rev (main 00fbe806 + d2375821): 0 DCP crashes."],
+        ),
     ]
     for label, head, body, comments in negatives:
         pr = {
@@ -211,7 +217,7 @@ def test_hw_row_detection():
             "multi-sentence single-line row (linux#3501 style)",
             "d237582111111111111111111111111111111111",
             "**Tested:** see comment",
-            ["J616s (M4 Pro, DCP firmware 26.6.2) regression row, PASS. Lock-in PQ check, saved fleet89 vs 7.3.0-fw27rev (main 00fbe806 + d2375821): 0 DCP crashes."],
+            ["J616s (M4 Pro, DCP firmware 26.6.2) regression row at d2375821, PASS. Lock-in PQ check, saved fleet89 vs 7.3.0-fw27rev (main 00fbe806 + d2375821): 0 DCP crashes."],
         ),
         (
             "skipped subtests count inside passing row",
@@ -249,6 +255,49 @@ def test_hw_row_detection():
 
 
 HEAD = "deadbeef" + "1" * 32
+
+
+def test_row_evidence_same_sentence():
+    head = "fde15875d98098ab065b2118e813d500cab6f2e6"
+    for text in (
+        "J615 passed on the previous build. Current commit fde15875.",
+        "J615 passed on the previous build. J615 fde15875.",
+        "J615 passed on the previous build. fde15875 smoke passed.",
+        "J615 passed on the previous build\nCurrent commit fde15875",
+        "J615\nfde15875 smoke passed",
+        "J615 fde15875\nsmoke passed",
+    ):
+        assert not PRR.is_row(text, head), text
+    assert PRR.is_row("Previous build failed. J615 fde15875 smoke passed.", head)
+    assert PRR.is_row("Old build only\nJ615 fde15875 smoke passed", head)
+
+
+def test_row_deferred_prefixes():
+    head = "fde15875d98098ab065b2118e813d500cab6f2e6"
+    for text in (
+        "Not yet: J615 smoke fde15875.",
+        "Still to run: J615 smoke fde15875.",
+        "TODO: J615 smoke fde15875.",
+        "- **Not yet:** J615 smoke fde15875.",
+        "Previous build passed. Not yet: J615 smoke fde15875.",
+        "Merged J615 smoke fde15875.",
+    ):
+        assert not PRR.is_row(text, head), text
+    assert PRR.is_row("J615 fde15875 smoke passed.", head)
+
+
+def test_row_explicit_failures():
+    head = "fde15875d98098ab065b2118e813d500cab6f2e6"
+    for text in (
+        "J615 fde15875 smoke failed.",
+        "J615 fde15875: boot passed, smoke FAIL.",
+        "J615 fde15875: booted, 10 failed units.",
+        "J615 fde15875: tested, failures=2.",
+        "J615 fde15875: 0 failed units, 1 test failed.",
+    ):
+        assert not PRR.is_row(text, head), text
+    for result in ("0 failed units", "zero failures", "no failures", "failures=0", "failed: 0"):
+        assert PRR.is_row(f"J615 fde15875: booted, {result}.", head), result
 
 
 def review(state="APPROVED", who="aurora-silicon-review[bot]", head=HEAD, when="2026-11-28T00:00:00Z", assoc="NONE"):
@@ -385,6 +434,9 @@ def main():
         test_ci_state_latest_run,
         test_hw_row_detection,
         test_deferred_row_wording,
+        test_row_evidence_same_sentence,
+        test_row_deferred_prefixes,
+        test_row_explicit_failures,
         test_app_approval_from_reviews,
         test_review_controls,
         test_review_pagination,

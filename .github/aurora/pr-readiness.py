@@ -76,16 +76,22 @@ GENS = {  # chip -> generation label
 }
 CHIP_GEN = {c: g for g, cs in GENS.items() for c in cs.split()}
 MAC_RE = re.compile(r"(?<![\w/.-])(J\d{3}[a-z]{0,2}|T[68]\d{3}|M[1-5](?: (?:Pro|Max|Ultra|Air|mini))?|Neo|MacBook(?: \w+)?|Mac ?mini|iMac|Mac Studio)(?![\w/.-])", re.I)
-RESULT_RE = re.compile(
+ZERO_FAILURE_RE = re.compile(
     r"(?:\b(?:0|zero|no)\s+fail(?:s|ed|ures?)?\b"
-    r"|\bfail(?:s|ed|ures?)?\s*[=:]?\s*0\b"
+    r"|\bfail(?:s|ed|ures?)?\s*[=:]?\s*0\b)",
+    re.I,
+)
+FAILED_ROW_RE = re.compile(r"\bfail(?:s|ed|ures?)?\b", re.I)
+RESULT_RE = re.compile(
+    rf"(?:{ZERO_FAILURE_RE.pattern}"
     r"|\b(?:boots?|booted|row|ran|runs?|tested|tests?|pass(?:es|ed)?|ok|clean"
     r"|soak|deqp|cts|kunit|regression|avcs?|units|works?|working|results?|verif(?:ied|ication)"
     r"|smoke|resumed?|wakes?|woke|no change)\b)",
     re.I,
 )
 NOT_ROW_RE = re.compile(
-    r"^\W*(?:(?:forward-)?(?:merged?|rebased?|cherry-picked)|not\s+yet\s*:|still\s+to\s+run\s*:|todo\s*:)\b",
+    r"^\W*(?:(?:forward-)?(?:merged?|rebased?|cherry-picked)\b"
+    r"|(?:not\s+yet|still\s+to\s+run|todo)\s*:)",
     re.I,
 )
 NEGATED_ROW_RE = re.compile(
@@ -473,12 +479,20 @@ def body_row_lines(body):
 
 
 def is_row(line, head):
-    """A hardware row: head SHA, a Mac and a positive result, not negated at the head."""
-    if (NOT_ROW_RE.search(line) or not head_prefix_in(line, head)
-            or not MAC_RE.search(line) or not RESULT_RE.search(line)):
-        return False
-    head_sents = [s for s in SENT_SPLIT_RE.split(line) if head_prefix_in(s, head)]
-    return any(not NEGATED_ROW_RE.search(s) for s in head_sents)
+    """Require the head SHA, Mac and positive result in one sentence on one line."""
+    for raw in line.splitlines():
+        if NOT_ROW_RE.search(raw):
+            continue
+        for sent in SENT_SPLIT_RE.split(raw):
+            if (NOT_ROW_RE.search(sent) or not head_prefix_in(sent, head)
+                    or not MAC_RE.search(sent) or not RESULT_RE.search(sent)
+                    or NEGATED_ROW_RE.search(sent)):
+                continue
+            # Zero-failure counts are positive evidence, but any remaining
+            # explicit failure disqualifies this head-bearing sentence.
+            if not FAILED_ROW_RE.search(ZERO_FAILURE_RE.sub("", sent)):
+                return True
+    return False
 
 
 def find_row(pr, sec, head):
