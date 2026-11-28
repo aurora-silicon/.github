@@ -15,7 +15,7 @@ how maintainers use it is the [maintainer handbook](https://github.com/aurora-si
 | `needs-review` | No approval that GitHub counts (Core or Omarchy Mac, not the author), and no `Verdict: MERGE` at the head from an organisation member other than the author. |
 | `needs-hw-row` | No line in the PR body (folded blocks included) or a comment with the head SHA (7+ hex digits) and a Mac (`J616s`, `T6040`, `M2 Air`, ...), and `Tested:` does not say `no runtime change`. |
 | `changes-requested` | A reviewer's latest review requests changes, or the latest review verdict at the head is FINISH, HOLD or CLOSE. |
-| `ci-failing` | A check failed at the head. |
+| `ci-failing` | The newest run of a check at the head failed (older cancelled or failed runs of the same check name are ignored when a newer run exists at the same head). |
 | `merge-conflict` | The PR conflicts with its base branch. |
 | `needs-template` | The body lacks `Tested:` or `Risk:` (door and Macs). |
 | `area:<name>` | A changed file matches a `# area: <name>` section of the repository's `CODEOWNERS`. |

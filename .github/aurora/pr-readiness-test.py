@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Unit tests for .github/aurora/pr-readiness.py."""
+import importlib.util
+import pathlib
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+SPEC = importlib.util.spec_from_file_location("pr_readiness", HERE / "pr-readiness.py")
+PRR = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PRR)
+
+
+def make_pr_ci(contexts):
+    return {
+        "url": "https://github.com/aurora-silicon/linux/pull/2772",
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "committedDate": "2026-11-24T10:00:00Z",
+                        "statusCheckRollup": {"contexts": {"nodes": contexts}},
+                    }
+                }
+            ]
+        },
+    }
+
+
+def check_run(name, status, conclusion, db_id=None, started=None, completed=None, url=None):
+    node = {
+        "__typename": "CheckRun",
+        "name": name,
+        "status": status,
+        "conclusion": conclusion,
+        "detailsUrl": url or f"https://example.invalid/{name}/{db_id or 0}",
+    }
+    if db_id is not None:
+        node["databaseId"] = db_id
+    if started is not None:
+        node["startedAt"] = started
+    if completed is not None:
+        node["completedAt"] = completed
+    return node
+
+
+def status_ctx(context, state, created=None):
+    node = {
+        "__typename": "StatusContext",
+        "context": context,
+        "state": state,
+        "targetUrl": f"https://example.invalid/{context}",
+    }
+    if created is not None:
+        node["createdAt"] = created
+    return node
+
+
+def test_ci_state_latest_run():
+    # Issue #9: older CANCELLED run + newer SUCCESS run -> ok (regardless of list order)
+    for order in (
+        [
+            check_run("apple-build", "COMPLETED", "CANCELLED", db_id=100, started="2026-11-24T10:00:00Z", completed="2026-11-24T10:01:00Z"),
+            check_run("apple-build", "COMPLETED", "SUCCESS", db_id=200, started="2026-11-24T10:01:05Z", completed="2026-11-24T10:05:00Z"),
+        ],
+        [
+            check_run("apple-build", "COMPLETED", "SUCCESS", db_id=200, started="2026-11-24T10:01:05Z", completed="2026-11-24T10:05:00Z"),
+            check_run("apple-build", "COMPLETED", "CANCELLED", db_id=100, started="2026-11-24T10:00:00Z", completed="2026-11-24T10:01:00Z"),
+        ],
+    ):
+        state, msg = PRR.ci_state(make_pr_ci(order))
+        assert state == "ok", f"expected ok, got {(state, msg)}"
+        assert "1 check passed" in msg, msg
+
+    # Newer-failure control: older SUCCESS + newer FAILURE -> failing
+    for order in (
+        [
+            check_run("apple-build", "COMPLETED", "SUCCESS", db_id=100, started="2026-11-24T10:00:00Z", completed="2026-11-24T10:02:00Z"),
+            check_run("apple-build", "COMPLETED", "FAILURE", db_id=200, started="2026-11-24T10:03:00Z", completed="2026-11-24T10:04:00Z"),
+        ],
+        [
+            check_run("apple-build", "COMPLETED", "FAILURE", db_id=200, started="2026-11-24T10:03:00Z", completed="2026-11-24T10:04:00Z"),
+            check_run("apple-build", "COMPLETED", "SUCCESS", db_id=100, started="2026-11-24T10:00:00Z", completed="2026-11-24T10:02:00Z"),
+        ],
+    ):
+        state, msg = PRR.ci_state(make_pr_ci(order))
+        assert state == "failing", f"expected failing, got {(state, msg)}"
+        assert "apple-build" in msg, msg
+
+    # Newer QUEUED run (no timestamps yet) supersedes older CANCELLED via databaseId
+    state, msg = PRR.ci_state(
+        make_pr_ci(
+            [
+                check_run("apple-build", "COMPLETED", "CANCELLED", db_id=100, started="2026-11-24T10:00:00Z", completed="2026-11-24T10:01:00Z"),
+                check_run("apple-build", "QUEUED", None, db_id=200),
+            ]
+        )
+    )
+    assert state == "pending", f"expected pending, got {(state, msg)}"
+
+    # Sole CANCELLED run (no newer run) still fails
+    state, msg = PRR.ci_state(
+        make_pr_ci([check_run("apple-build", "COMPLETED", "CANCELLED", db_id=100)])
+    )
+    assert state == "failing", f"expected failing, got {(state, msg)}"
+
+    # Timestamp fallback without databaseId
+    state, msg = PRR.ci_state(
+        make_pr_ci(
+            [
+                check_run("pr-text", "COMPLETED", "SUCCESS", started="2026-11-24T10:05:00Z", completed="2026-11-24T10:06:00Z"),
+                check_run("pr-text", "COMPLETED", "CANCELLED", started="2026-11-24T10:00:00Z", completed="2026-11-24T10:01:00Z"),
+            ]
+        )
+    )
+    assert state == "ok", f"expected ok, got {(state, msg)}"
+
+    # StatusContext deduplication by createdAt
+    state, msg = PRR.ci_state(
+        make_pr_ci(
+            [
+                status_ctx("ci/external", "FAILURE", created="2026-11-24T10:00:00Z"),
+                status_ctx("ci/external", "SUCCESS", created="2026-11-24T10:05:00Z"),
+            ]
+        )
+    )
+    assert state == "ok", f"expected ok, got {(state, msg)}"
+
+    # Different check names stay independent
+    state, msg = PRR.ci_state(
+        make_pr_ci(
+            [
+                check_run("apple-build", "COMPLETED", "SUCCESS", db_id=200),
+                check_run("dt-checks", "COMPLETED", "FAILURE", db_id=150),
+            ]
+        )
+    )
+    assert state == "failing" and "dt-checks" in msg, (state, msg)
+
+
+def main():
+    tests = [
+        test_ci_state_latest_run,
+    ]
+    for fn in tests:
+        fn()
+        print(f"PASS {fn.__name__}")
+    print(f"ALL {len(tests)} PASSED")
+
+
+if __name__ == "__main__":
+    main()

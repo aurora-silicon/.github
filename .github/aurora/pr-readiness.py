@@ -167,8 +167,8 @@ query($owner:String!,$name:String!,$n:Int!){
       comments(last:100){totalCount nodes{databaseId body url author{login} authorAssociation createdAt}}
       commits(last:1){nodes{commit{committedDate statusCheckRollup{state contexts(first:100){nodes{
         __typename
-        ... on CheckRun{name status conclusion detailsUrl}
-        ... on StatusContext{context state targetUrl}}}}}}}}}}
+        ... on CheckRun{name status conclusion detailsUrl databaseId startedAt completedAt}
+        ... on StatusContext{context state targetUrl createdAt}}}}}}}}}}
 """
 
 
@@ -327,15 +327,43 @@ def short(sha):
     return sha[:8]
 
 
+def _context_is_newer(cand, prev):
+    """Return True if check context `cand` is newer than `prev` for the same check."""
+    cid, pid = cand.get("databaseId"), prev.get("databaseId")
+    if cid is not None and pid is not None:
+        return cid > pid
+    cts = cand.get("startedAt") or cand.get("completedAt") or cand.get("createdAt") or ""
+    pts = prev.get("startedAt") or prev.get("completedAt") or prev.get("createdAt") or ""
+    if cts and pts:
+        if cts != pts:
+            return cts > pts
+        c_end = cand.get("completedAt") or ""
+        p_end = prev.get("completedAt") or ""
+        if c_end != p_end:
+            return c_end > p_end
+    return True
+
+
+def _latest_contexts(ctx):
+    """Collapse repeated runs of the same check at the head SHA to the newest run."""
+    latest = {}
+    for c in ctx:
+        name = c["name"] if c["__typename"] == "CheckRun" else c["context"]
+        if IGNORE_CHECKS.search(name):
+            continue
+        key = (c["__typename"], name)
+        if key not in latest or _context_is_newer(c, latest[key]):
+            latest[key] = c
+    return list(latest.values())
+
+
 def ci_state(pr):
     nodes = (((pr["commits"]["nodes"] or [{}])[0].get("commit") or {}).get("statusCheckRollup") or {})
-    ctx = (nodes.get("contexts") or {}).get("nodes") or []
+    ctx = _latest_contexts((nodes.get("contexts") or {}).get("nodes") or [])
     failing, pending, passed = [], [], 0
     for c in ctx:
         if c["__typename"] == "CheckRun":
             name = c["name"]
-            if IGNORE_CHECKS.search(name):
-                continue
             if c["status"] != "COMPLETED":
                 pending.append(name)
             elif c["conclusion"] in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"):
@@ -344,8 +372,6 @@ def ci_state(pr):
                 passed += 1
         else:
             name = c["context"]
-            if IGNORE_CHECKS.search(name):
-                continue
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
             elif c["state"] in ("FAILURE", "ERROR"):
