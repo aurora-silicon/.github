@@ -85,6 +85,7 @@ query($q:String!,$after:String){
   search(query:$q,type:ISSUE,first:50,after:$after){
     pageInfo{hasNextPage endCursor}
     nodes{... on PullRequest{number updatedAt headRefOid isDraft mergeable reviewDecision createdAt
+      autoMergeRequest{enabledAt}
       repository{name isPrivate isArchived} author{login __typename}
       labels(first:30){nodes{name}}
       commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}
@@ -469,28 +470,112 @@ def oneline(text, n=280):
 EV_VERSION = 3  # bump when the arm/merge gate changes: older cached evaluations never arm or merge
 HOLDS = {}  # PR key -> lane line that holds it (filled per run by lane_holds)
 HOLD_RE = re.compile(r"\bHOLD\b|do ?n[o']t merge|do-not-merge|\bFAIL(ED|S|URES?)?\b|\bregress(ion|ed|es)\b|\breverted?\b|rows? owed", re.I)
-CLEAR_RE = re.compile(r"\bverdict\W{0,8}MERGE\b|\bPASS(ED)?\b.*\b(no|0) (regressions?|fail)|\bmerge[- ]ready\b|\bhold (lifted|released|cleared)\b", re.I)
+# Explicit release: clears a hold from any scanned file when it is newer than the hold.
+RELEASE_RE = re.compile(r"\bverdict\W{0,8}MERGE\b|\bmerge[- ]ready\b|\bhold (lifted|released|cleared|removed)\b|\bunhold\b", re.I)
+# A passing re-run row: clears a hold only in the same file (the row lane superseding its own FAIL).
+PASS_RE = re.compile(r"\bPASS(ED)?\b.*\b(no|0) (regressions?|fail)", re.I)
+LINE_TS_RE = re.compile(r"^\W*(?:(\d{4}-\d{2}-\d{2})[ T])?([01]?\d|2[0-3]):([0-5]\d)\b")
+
+
+def line_times(path, lines):
+    """(lo, hi) time bounds per line of an append-only lane file, in TZ.
+
+    Lines start '- YYYY-MM-DD HH:MM' or '- HH:MM'. A bare HH:MM takes its date from the nearest
+    dated line above it (a day later when the clock goes back more than 6 h); lines above the first
+    dated line count back from it, or from the file's mtime when no line is dated. A line without a
+    time of its own gets the previous timed line as its lower bound and the next as its upper bound
+    (lo None when there is none above it)."""
+    n = len(lines)
+    parsed = []
+    for line in lines:
+        m = LINE_TS_RE.match(line)
+        d = m and m.group(1)
+        if d:
+            try:
+                d = dt.datetime.fromisoformat(d)
+            except ValueError:
+                d = None  # not a date: treat the time as a bare HH:MM
+        parsed.append((d, int(m.group(2)), int(m.group(3))) if m else None)
+    t = [None] * n
+    first = next((i for i, p in enumerate(parsed) if p and p[0]), None)
+    if first is not None:
+        anchor = None
+        for i in range(first, n):
+            p = parsed[i]
+            if p and p[0]:
+                anchor = p[0].replace(hour=p[1], minute=p[2], tzinfo=TZ)
+            elif p:
+                x = anchor.replace(hour=p[1], minute=p[2])
+                if x < anchor - dt.timedelta(hours=6):
+                    x += dt.timedelta(days=1)
+                anchor = x
+            if p:
+                t[i] = anchor
+        end, anchor = first, t[first]
+    else:
+        try:
+            anchor = dt.datetime.fromtimestamp(os.path.getmtime(path), TZ)
+        except OSError:
+            anchor = dt.datetime.now(TZ)
+        end = n
+    for i in range(end - 1, -1, -1):
+        p = parsed[i]
+        if p:
+            x = anchor.replace(hour=p[1], minute=p[2], second=0, microsecond=0)
+            if x > anchor + dt.timedelta(minutes=30):
+                x -= dt.timedelta(days=1)
+            anchor = t[i] = x
+    lo, hi, last = [None] * n, [None] * n, None
+    for i in range(n):
+        last = t[i] or last
+        lo[i] = last
+    try:
+        last = dt.datetime.fromtimestamp(os.path.getmtime(path), TZ)
+    except OSError:
+        last = dt.datetime.now(TZ)
+    for i in range(n - 1, -1, -1):
+        last = t[i] or last
+        hi[i] = last
+    return list(zip(lo, hi))
 
 
 def lane_holds():
-    """A lane's latest line about a PR says HOLD / FAIL / regression / revert / rows owed -> do not arm or merge."""
+    """Lane lines that HOLD a PR (HOLD / FAIL / regression / revert / rows owed) block arming and merging.
+
+    A hold stays until a release newer than it: an explicit release line (Verdict: MERGE, merge-ready,
+    hold lifted/released/cleared) from any scanned file, or a later PASS-with-no-failures row in the same
+    file. Neutral lines mentioning the PR change nothing, so a file scanned later can never hide a hold
+    from another file. Across files, times are compared; a hold's time is its upper bound and a
+    release's its lower bound, and a tie keeps the hold."""
     rx = re.compile(r"github\.com/" + ORG + r"/([\w.-]+)/pull/(\d+)|\b([a-z][\w.-]+)#(\d{2,5})\b")
-    latest = {}
+    holds, releases = {}, {}  # PR key -> [(file, line index, time, line)]
     for path in CFG.get("hold_scan_files", []):
         try:
             lines = open(path, errors="replace").read().splitlines()[-CFG.get("hold_scan_lines", 600):]
         except OSError:
             continue
-        for line in lines:
+        times = line_times(path, lines)
+        for i, line in enumerate(lines):
             if "PR-FLOW ->" in line:
                 continue  # our own assignment lines
+            explicit, passed = RELEASE_RE.search(line), PASS_RE.search(line)
+            if explicit or passed:
+                kind, when = (releases, (times[i][0], bool(explicit)))
+            elif HOLD_RE.search(line):
+                kind, when = (holds, times[i][1])
+            else:
+                continue
             for m in rx.finditer(line):
                 repo, n = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
-                latest[f"{repo}#{n}"] = (os.path.basename(path), line)
+                kind.setdefault(f"{repo}#{n}", []).append((path, i, when, line))
     HOLDS.clear()
-    for k, (f, line) in latest.items():
-        if HOLD_RE.search(line) and not CLEAR_RE.search(line):
-            HOLDS[k] = f"{f}: {' '.join(line.split())[:160]}"
+    for k, hs in holds.items():
+        for path, i, when, line in reversed(hs):
+            released = any(rp == path and ri > i or rp != path and explicit and rt is not None and rt > when
+                           for rp, ri, (rt, explicit), _ in releases.get(k, []))
+            if not released:
+                HOLDS[k] = f"{os.path.basename(path)}: {' '.join(line.split())[:160]}"
+                break
 
 
 def approved_at_head(ev):
@@ -506,7 +591,8 @@ def can_arm(ev):
     return (not ev["private"] and not ev["blockers"] and not ev.get("manual")) and ev["ci"] in ("ok", "none")
 
 
-ARMED_PER_REPO = {}
+ARMED_PER_REPO = {}  # serial repo -> PRs armed by pr-flow kept this run (the oldest)
+LIVE_ARMS = {}  # repo -> PR keys with auto-merge on, whoever armed them (from the listing, then our arms/disarms)
 repo_actions = {}  # repo -> merges/arms this run (serialize: two CLEAN PRs can still break the tip together)
 
 
@@ -532,6 +618,7 @@ def _merge_actions(ev, st, merged_log):
         if write("disarm", f"{key} ({why})", lambda: gql(
                 "mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}", kind="write", id=ev["id"])) in ("ok", "dry"):
             st.pop("armed", None)
+            LIVE_ARMS.get(ev["repo"], set()).discard(key)
         return
     if not ev["auto"] and armed:
         st.pop("armed", None)  # someone disarmed it, or GitHub did after a push
@@ -540,7 +627,12 @@ def _merge_actions(ev, st, merged_log):
     serial = ev["repo"] in CFG.get("serial_repos", [])
     if repo_actions.get(ev["repo"], 0) >= CFG.get("merges_per_repo_per_run", 1):
         return
+    # One slot per repo: an outstanding arm on another PR (ours or anyone's) can land on its own approval,
+    # so a direct merge beside it would put two untested-together merges on the tip.
+    armed_others = LIVE_ARMS.get(ev["repo"], set()) - {key}
     if ev["ready"] and ev["mss"] in ("CLEAN", "HAS_HOOKS") and ev["decision"] in ("APPROVED", None) and approved_at_head(ev):
+        if armed_others:
+            return
         repo_actions[ev["repo"]] = repo_actions.get(ev["repo"], 0) + 1
         r = write("merge", key, lambda: call("PUT", f"/repos/{ORG}/{ev['repo']}/pulls/{ev['n']}/merge",
                                               {"merge_method": "merge", "sha": ev["head"]}, kind="write"))
@@ -548,7 +640,7 @@ def _merge_actions(ev, st, merged_log):
             merged_log.append((key, ev["url"], "merged by pr-flow", ev["head"]))
             st["merged_by_flow"] = NOW.isoformat()
         return
-    if serial and ARMED_PER_REPO.get(ev["repo"], 0) >= 1:
+    if serial and armed_others:
         return  # serial repos: one armed PR at a time, so approvals can't land two untested-together merges
     if not ev["auto"] and ev["mss"] == "BLOCKED":
         # Only BLOCKED (by the review rule) PRs are armed: a CLEAN PR that is
@@ -558,7 +650,7 @@ def _merge_actions(ev, st, merged_log):
             kind="write", id=ev["id"], h=ev["head"]))
         if r in ("ok", "dry"):
             st["armed"] = {"head": ev["head"], "at": NOW.isoformat()}
-            ARMED_PER_REPO[ev["repo"]] = ARMED_PER_REPO.get(ev["repo"], 0) + 1
+            LIVE_ARMS.setdefault(ev["repo"], set()).add(key)
 
 
 def needs_of(ev, st):
@@ -884,10 +976,15 @@ def main():
         return
     state = json.load(open(STATE_FILE)) if os.path.exists(STATE_FILE) else {}
     state.setdefault("prs", {})
+    for g in (counts, ARMED_PER_REPO, LIVE_ARMS, repo_actions):
+        g.clear()
     load_members(state)
     start = time.time()
 
     listing = search(LIST_Q, f"org:{ORG} is:pr is:open draft:false archived:false")
+    for p in listing:  # every live arm, before any filter: bot PRs and PRs without a fresh evaluation count too
+        if p.get("autoMergeRequest"):
+            LIVE_ARMS.setdefault(p["repository"]["name"], set()).add(f"{p['repository']['name']}#{p['number']}")
     listing = [p for p in listing if (p.get("author") or {}).get("__typename") != "Bot" and not p["repository"]["isArchived"]]
     open_keys = {f"{p['repository']['name']}#{p['number']}" for p in listing}
     log(f"{len(listing)} open non-draft PRs")
@@ -908,6 +1005,7 @@ def main():
                 log(f"{k}: {e}")
 
     evs = []
+    stale = set()  # listed from the cache because the refresh did not happen: queue only, never arm/merge/route
     detail_budget = CFG["detail_budget_s"]
     for p in sorted(listing, key=lambda p: p["createdAt"]):
         k = f"{p['repository']['name']}#{p['number']}"
@@ -918,6 +1016,7 @@ def main():
             if time.time() - start > detail_budget:
                 if st.get("ev"):
                     evs.append(st["ev"])
+                    stale.add(k)
                 continue
             try:
                 pr = gql(DETAIL_Q, owner=ORG, name=p["repository"]["name"], n=p["number"])["repository"]["pullRequest"]
@@ -926,6 +1025,7 @@ def main():
                 log(f"{k}: {e}")
                 if st.get("ev"):
                     evs.append(st["ev"])
+                    stale.add(k)
                 continue
             st["fp"], st["ev"], st["ev_at"] = fp, ev, NOW.isoformat()
         evs.append(st["ev"])
@@ -934,6 +1034,8 @@ def main():
     extra = set()
     for ev in sorted(evs, key=lambda e: state["prs"][f"{e['repo']}#{e['n']}"].get("armed", {}).get("at", "")):
         st = state["prs"][f"{ev['repo']}#{ev['n']}"]
+        if ev["auto"]:
+            LIVE_ARMS.setdefault(ev["repo"], set()).add(f"{ev['repo']}#{ev['n']}")
         if ev["auto"] and st.get("armed") and st["armed"]["head"] == ev["head"]:
             if ev["repo"] in CFG.get("serial_repos", []) and ARMED_PER_REPO.get(ev["repo"], 0) >= 1:
                 extra.add(f"{ev['repo']}#{ev['n']}")  # serial repo: keep only the oldest armed
@@ -941,7 +1043,9 @@ def main():
             ARMED_PER_REPO[ev["repo"]] = ARMED_PER_REPO.get(ev["repo"], 0) + 1
     for ev in evs:
         st = state["prs"][f"{ev['repo']}#{ev['n']}"]
-        if ev.get("v") != EV_VERSION:
+        if ev.get("v") != EV_VERSION or f"{ev['repo']}#{ev['n']}" in stale:
+            # Old format, or the refresh failed / ran out of budget: the cached evidence may predate
+            # the change the listing saw. Never arm or merge on it; the only write is disarming ours.
             ev = dict(ev, blockers=list(ev["blockers"]) + ["stale-eval"])
         if f"{ev['repo']}#{ev['n']}" in extra:
             ev = dict(ev, blockers=list(ev["blockers"]) + ["serial"])  # never arm/merge on an old evaluation; disarms ours
@@ -950,8 +1054,9 @@ def main():
 
     index = lane_index()
     active = active_reviewers(state)
-    assign_reviews(evs, state, active, index)
-    route_changes(evs, state, index)
+    fresh = [ev for ev in evs if f"{ev['repo']}#{ev['n']}" not in stale]
+    assign_reviews(fresh, state, active, index)
+    route_changes(fresh, state, index)
 
     # Merge ledger + metrics.
     led = os.path.join(STATE_DIR, "merges.tsv")
