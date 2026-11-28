@@ -1,0 +1,6 @@
+{
+  "name": "Aurora hwfact lint",
+  "description": "Warns on hardware facts (dB, rates, gains, counts, board lists) written as literals in a PR's added lines.",
+  "iconName": "octicon checklist",
+  "categories": ["Automation"]
+}
